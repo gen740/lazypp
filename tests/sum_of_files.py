@@ -1,10 +1,10 @@
 from typing import TypedDict
-from lazypp import AbstTask, Directory, File
+from lazypp import TaskBase, Directory, File
 from pathlib import Path
 import os
 
 
-AbstTask.change_cache_dir(str(Path(__file__).parent / "cache"))
+TaskBase.change_cache_dir(str(Path(__file__).parent / "cache"))
 
 
 class FInput(TypedDict):
@@ -16,7 +16,7 @@ class FOutput(TypedDict):
     files: Directory
 
 
-class CreateFiles(AbstTask[FInput, FOutput]):
+class CreateFiles(TaskBase[FInput, FOutput]):
     def task(self, input, output):
         n = int(input["n"])
         delta = int(input["delta"])
@@ -44,7 +44,7 @@ class SumOutput(TypedDict):
     result_file: File
 
 
-class SumFiles(AbstTask[SumInput, SumOutput]):
+class SumFiles(TaskBase[SumInput, SumOutput]):
     def task(self, input, output):
         files = os.listdir(input["files"].output["files"].path)
         total = 0

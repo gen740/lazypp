@@ -1,8 +1,9 @@
-from typing import TypedDict, TypeVar, Generic
-from lazypp import AbstTask, Directory, File
+from typing import TypedDict
+from lazypp import TaskBase, File
+from pathlib import Path
 
 
-AbstTask.change_cache_dir(str(Path(__file__).parent / "cache"))
+TaskBase.change_cache_dir(str(Path(__file__).parent / "cache"))
 
 
 class Fin(TypedDict):
@@ -14,7 +15,7 @@ class Fout(TypedDict):
     outtext: str
 
 
-class CreateFile(AbstTask[Fin, Fout]):
+class CreateFile(TaskBase[Fin, Fout]):
     def task(self, input, output):
         with open(input["prefix"].path, "r") as f:
             content = f.read()
@@ -39,7 +40,7 @@ class Fout2(TypedDict):
     out: str
 
 
-class ReadFileTask(AbstTask[Fin2, Fout2]):
+class ReadFileTask(TaskBase[Fin2, Fout2]):
     def task(self, input, output):
         print(self.work_dir)
 

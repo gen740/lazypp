@@ -39,7 +39,7 @@ def _is_outside_base(relative_path: Path) -> bool:
     return False
 
 
-class AbstTask[INPUT, OUTPUT](ABC):
+class TaskBase[INPUT, OUTPUT](ABC):
     CACHE_DIR = Path(__file__).parent.parent / ".cache"
 
     _is_temporary = False
@@ -53,7 +53,7 @@ class AbstTask[INPUT, OUTPUT](ABC):
         if not os.path.isabs(new_dir):
             print("Cache directory should be absolute path")
             exit(1)
-        AbstTask.CACHE_DIR = Path(new_dir)
+        TaskBase.CACHE_DIR = Path(new_dir)
 
     def __init__(
         self,
@@ -93,7 +93,7 @@ class AbstTask[INPUT, OUTPUT](ABC):
                         shutil.copytree(v.source_path, self.work_dir / v.path)
 
             # Copy output files which are dependencies of this task
-            if isinstance(v, AbstTask):
+            if isinstance(v, TaskBase):
                 v.output  # call output to run the task
                 for _, iv in v.output.items():
                     if isinstance(iv, File) or isinstance(iv, Directory):
@@ -113,10 +113,10 @@ class AbstTask[INPUT, OUTPUT](ABC):
         Check if cache exists
         If corresponding hash directory or output files are not found return False
         """
-        if os.path.exists(AbstTask.CACHE_DIR / self.hash):
+        if os.path.exists(TaskBase.CACHE_DIR / self.hash):
             if isinstance(self._output, dict):
                 for i, _ in self._output.items():
-                    if not os.path.exists(AbstTask.CACHE_DIR / self.hash / i):
+                    if not os.path.exists(TaskBase.CACHE_DIR / self.hash / i):
                         return False
                 return True
         return False
@@ -129,18 +129,18 @@ class AbstTask[INPUT, OUTPUT](ABC):
             str            : read from file
 
         """
-        if not os.path.exists(AbstTask.CACHE_DIR / self.hash):
+        if not os.path.exists(TaskBase.CACHE_DIR / self.hash):
             raise FileNotFoundError(f"Cache for {self.hash} not found")
         if not isinstance(self._output, dict):
             raise ValueError("Output is not a dictionary")
 
         for i, v in self._output.items():
             if isinstance(v, File) or isinstance(v, Directory):
-                if not os.path.exists(AbstTask.CACHE_DIR / self.hash / i):
+                if not os.path.exists(TaskBase.CACHE_DIR / self.hash / i):
                     raise FileNotFoundError(f"Cache for {i} not found")
-                v.cache_path = AbstTask.CACHE_DIR / self.hash / i
+                v.cache_path = TaskBase.CACHE_DIR / self.hash / i
             elif isinstance(v, str):
-                with open(AbstTask.CACHE_DIR / self.hash / i, "r") as f:
+                with open(TaskBase.CACHE_DIR / self.hash / i, "r") as f:
                     self._output[i] = f.read()
 
     @property
@@ -151,12 +151,12 @@ class AbstTask[INPUT, OUTPUT](ABC):
         if self._cached_output is not None:
             return self._cached_output
         outer_prev_path = None
-        if AbstTask._is_temporary:
+        if TaskBase._is_temporary:
             outer_prev_path = os.getcwd()
-            AbstTask._is_temporary = False
+            TaskBase._is_temporary = False
 
-        if not os.path.exists(AbstTask.CACHE_DIR):
-            os.makedirs(AbstTask.CACHE_DIR)
+        if not os.path.exists(TaskBase.CACHE_DIR):
+            os.makedirs(TaskBase.CACHE_DIR)
 
         # calculate hash
         self.hash
@@ -172,16 +172,16 @@ class AbstTask[INPUT, OUTPUT](ABC):
             prev_path = os.getcwd()
 
             os.chdir(self.work_dir)
-            AbstTask._is_temporary = True
+            TaskBase._is_temporary = True
             self.task(self._input, self._output)
             os.chdir(prev_path)
-            AbstTask._is_temporary = False
+            TaskBase._is_temporary = False
 
             self._cache_output()
 
         if outer_prev_path:
             os.chdir(outer_prev_path)
-            AbstTask._is_temporary = True
+            TaskBase._is_temporary = True
 
         self._cached_output = self._output
 
@@ -192,15 +192,15 @@ class AbstTask[INPUT, OUTPUT](ABC):
             return
 
         # remove if exists
-        if os.path.exists(AbstTask.CACHE_DIR / self.hash):
-            shutil.rmtree(AbstTask.CACHE_DIR / self.hash)
+        if os.path.exists(TaskBase.CACHE_DIR / self.hash):
+            shutil.rmtree(TaskBase.CACHE_DIR / self.hash)
 
-        os.makedirs(AbstTask.CACHE_DIR / self.hash)
+        os.makedirs(TaskBase.CACHE_DIR / self.hash)
         for i, v in self._output.items():
             val: str | File = v
-            cache_path = AbstTask.CACHE_DIR / self.hash / i
+            cache_path = TaskBase.CACHE_DIR / self.hash / i
             if isinstance(val, File) or isinstance(val, Directory):
-                os.makedirs(AbstTask.CACHE_DIR / self.hash / i, exist_ok=True)
+                os.makedirs(TaskBase.CACHE_DIR / self.hash / i, exist_ok=True)
                 if not os.path.exists(self.work_dir / val.path):
                     raise FileNotFoundError(f"{val.path} not found")
                 if not os.path.isabs(val.path):
@@ -208,8 +208,8 @@ class AbstTask[INPUT, OUTPUT](ABC):
                 val.cache_path = cache_path
             elif isinstance(val, str):
                 # save string to cache
-                os.makedirs(AbstTask.CACHE_DIR / self.hash, exist_ok=True)
-                with open(AbstTask.CACHE_DIR / self.hash / i, "w") as f:
+                os.makedirs(TaskBase.CACHE_DIR / self.hash, exist_ok=True)
+                with open(TaskBase.CACHE_DIR / self.hash / i, "w") as f:
                     f.write(val)
 
     @property
@@ -239,7 +239,7 @@ class AbstTask[INPUT, OUTPUT](ABC):
                 if isinstance(v, str):
                     hash.update(v.encode())
 
-                if isinstance(v, AbstTask):
+                if isinstance(v, TaskBase):
                     hash.update(v.hash.encode())
 
         self._hash = hash.hexdigest()

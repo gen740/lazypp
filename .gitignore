@@ -8,3 +8,4 @@ venv/
 .venv/
 
 *.egg-info/
+build/
