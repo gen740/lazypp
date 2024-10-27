@@ -1,10 +1,8 @@
 from typing import TypedDict
-from lazypp import TaskBase, Directory, File
+from lazypp import BaseTask, Directory, File
 from pathlib import Path
 import os
-
-
-TaskBase.change_cache_dir(str(Path(__file__).parent / "cache"))
+import asyncio
 
 
 class FInput(TypedDict):
@@ -16,22 +14,25 @@ class FOutput(TypedDict):
     files: Directory
 
 
-class CreateFiles(TaskBase[FInput, FOutput]):
-    def task(self, input, output):
+class CreateFiles(BaseTask[FInput, FOutput]):
+    async def task(self, input):
         n = int(input["n"])
         delta = int(input["delta"])
-        os.mkdir(output["files"].path)
+
+        if not os.path.exists("files"):
+            os.mkdir("files")
 
         content = 0
         for i in range(0, n):
-            with open(f"{output['files'].path}/file_{i}.txt", "w") as f:
+            with open(f"files/file_{i}.txt", "w") as f:
                 f.write(str(content))
             content += delta
+        return FOutput({"files": Directory(path="files")})
 
 
 create_files_task = CreateFiles(
-    input={"n": "27", "delta": "10"},
-    output={"files": Directory(path="files")},
+    input={"n": "28", "delta": "10"},
+    cache_dir=Path("cache").resolve(),
 )
 
 
@@ -44,24 +45,26 @@ class SumOutput(TypedDict):
     result_file: File
 
 
-class SumFiles(TaskBase[SumInput, SumOutput]):
-    def task(self, input, output):
-        files = os.listdir(input["files"].output["files"].path)
+class SumFiles(BaseTask[SumInput, SumOutput]):
+    async def task(self, input):
+        files = os.listdir((await input["files"]())["files"].path)
         total = 0
         for file in files:
-            with open(f"{input['files'].output["files"].path}/{file}", "r") as f:
+            with open(f"{(await input['files']())["files"].path}/{file}", "r") as f:
                 total += int(f.read())
-        output["sum"] = str(total)
+        sum = str(total)
 
-        with open(output["result_file"].path, "w") as f:
-            f.write(output["sum"])
+        with open("result.txt", "w") as f:
+            f.write(sum)
+
+        return SumOutput({"sum": sum, "result_file": File(path="result.txt")})
 
 
 sum_files_task = SumFiles(
     input={"files": create_files_task},
-    output={"sum": "1", "result_file": File(path="result.txt")},
+    cache_dir=Path("cache").resolve(),
 )
 
-sum_files_task.output["result_file"].copy("out", dirs_exist_ok=True)
+# sum_files_task.output["result_file"].copy("out", dirs_exist_ok=True)
 
-print(sum_files_task.output)
+print(asyncio.run(sum_files_task()))

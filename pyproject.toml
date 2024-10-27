@@ -9,5 +9,12 @@ name = "lazypp"
 version = "0.1.0"
 description = "A Python package named lazypp"
 
+[project.optional-dependencies]
+tests = ["pytest"]
+
 [tool.setuptools.packages.find]
 include = ["lazypp*"]
+
+[tool.pytest.ini_options]
+addopts = "--color=yes"
+

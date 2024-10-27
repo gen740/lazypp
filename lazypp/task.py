@@ -1,216 +1,236 @@
 from abc import ABC
+from collections import defaultdict
+import pickle
+from pickle import PicklingError
 from hashlib import md5
+import threading
 from inspect import getsource
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import copy
-import hashlib
+from typing import Any, TypeGuard, cast
+import json
 import os
 import shutil
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
-from .file_objects import File, Directory
+from lazypp.worker import Worker
+
+from .file_objects import File, Directory, BaseEntry
 
 
-def _md5_update(md5_obj: "hashlib._Hash", directory: str | Path) -> "hashlib._Hash":
+def _pickleable(obj):
     """
-    update hash object with all files in directory
+    Check if object is pickable
     """
-    for root, _, files in os.walk(directory):
-        for file in files:
-            file_path = os.path.join(root, file)
-            with open(file_path, "rb") as f:
-                for chunk in iter(lambda: f.read(32768), b""):
-                    md5_obj.update(chunk)
-    return md5_obj
+    try:
+        pickle.dumps(obj)
+        return True
+    except PicklingError:
+        return False
 
 
-def _is_outside_base(relative_path: Path) -> bool:
+def _is_valid_input(input: Any) -> TypeGuard[dict[str, Any] | None]:
     """
-    Check if relative path is outside base directory
+    Validate input
+
+    key should be string
+    value is BaseEntry, BaseTask or pickleable object
+
+    or Map of these
+
+    str
+    int
+    float
+    BaseEntry
+    BaseTask
+
+    or Map / Sequence of these
+
     """
-    depth = 0
-    for part in relative_path.parts:
-        if part == "..":
-            depth -= 1
-        elif part != ".":
-            depth += 1
-        if depth < 0:
-            return True
-    return False
+    if input is None:
+        return True
+
+    if not isinstance(input, dict):
+        return False
+
+    for key, val in input.items():
+        if not isinstance(key, str):
+            return False
+
+        if not (
+            BaseTask in val.__class__.__mro__
+            or BaseEntry in val.__class__.__mro__
+            or _pickleable(val)
+        ):
+            return False
+
+    return True
 
 
-class TaskBase[INPUT, OUTPUT](ABC):
-    CACHE_DIR = Path(__file__).parent.parent / ".cache"
+def _is_valid_output(output: Any) -> TypeGuard[dict[str, Any] | None]:
+    """
+    Validate output
 
-    _is_temporary = False
-    _prev_path = os.getcwd()
+    key should be string
 
-    @staticmethod
-    def change_cache_dir(new_dir: str | Path):
-        """
-        Change cache directory
-        """
-        if not os.path.isabs(new_dir):
-            print("Cache directory should be absolute path")
-            exit(1)
-        TaskBase.CACHE_DIR = Path(new_dir)
+    value should be File, Directory, str or pickleable object
+    """
+    if output is None:
+        return True
+
+    if not isinstance(output, dict):
+        return False
+
+    for key, val in output.items():
+        if not isinstance(key, str):
+            return False
+
+        if not (BaseEntry in val.__class__.__mro__ or _pickleable(val)):
+            return False
+
+    return True
+
+
+class BaseTask[INPUT, OUTPUT](ABC):
+    _global_locks = defaultdict(asyncio.Lock)
 
     def __init__(
         self,
+        cache_dir: str | Path,
+        input: INPUT,
+        worker: ThreadPoolExecutor | None = None,
         work_dir: str | Path | None = None,
-        input: INPUT = None,
-        output: OUTPUT = None,
     ):
         self._work_dir: Path | TemporaryDirectory | None = (
             Path(work_dir) if work_dir else None
         )
-        self._hash: str | None = None
-        self._input = copy.deepcopy(input)
-        self._output = copy.deepcopy(output)
         self._cached_output: OUTPUT | None = None
+        self._worker = worker
+        self._cache_dir = Path(cache_dir)
+        self._input = input
 
-    def task(self, input: INPUT, output: OUTPUT) -> None:
-        _ = (output, input)
+        self._hash: str | None = None
+
+    async def task(self, input: INPUT) -> OUTPUT:
+        _ = input
         raise NotImplementedError
 
-    def _task_setup(self):
-        """
-        Create input files
-        """
-        if not isinstance(self._input, dict):
-            raise ValueError("Input should be a dictionary")
-        for _, v in self._input.items():
-            # Copy files to work_dir
-            if isinstance(v, File) or isinstance(v, Directory):
-                if not os.path.exists(v.source_path):
-                    raise FileNotFoundError(f"{v.source_path} not found")
-                if not os.path.isabs(v.path):
-                    if _is_outside_base(v.path):
-                        raise ValueError("Could not copy file outside base directory")
-                    if isinstance(v, File):
-                        shutil.copy(v.source_path, self.work_dir / v.path)
-                    else:
-                        shutil.copytree(v.source_path, self.work_dir / v.path)
+    async def __call__(self) -> OUTPUT:
+        async with BaseTask._global_locks[self.hash]:
+            if self._cached_output is not None:
+                return self._cached_output
 
-            # Copy output files which are dependencies of this task
-            if isinstance(v, TaskBase):
-                v.output  # call output to run the task
-                for _, iv in v.output.items():
-                    if isinstance(iv, File) or isinstance(iv, Directory):
-                        if not os.path.exists(iv.cache_path):
-                            raise FileNotFoundError(f"{iv.source_path} not found")
-                        if isinstance(iv, File):
-                            shutil.copy(
-                                iv.cache_path / iv.source_path, self.work_dir / iv.path
-                            )
-                        else:
-                            shutil.copytree(
-                                iv.cache_path / iv.source_path, self.work_dir / iv.path
-                            )
+            if self._check_cache():
+                print(f"{self.__class__.__name__}: Cache found skipping ({self.hash})")
+                return self._load_from_cache()
+
+            await self._setup()
+
+            prev_dir = os.getcwd()
+            os.chdir(self.work_dir)
+
+            print(f"{self.__class__.__name__}: Running task ({self.hash})")
+            if self._worker is None:
+                output = await self.task(self._input)
+            else:
+                loop = asyncio.get_event_loop()
+                output = await loop.run_in_executor(
+                    None, self.task, self._input
+                ).result()
+
+            self._cache_output(output)
+            self.cache_output = output
+            os.chdir(prev_dir)
+
+        return output
+
+        # return self.output
+
+    @property
+    async def output(self) -> OUTPUT:
+        """
+        return synchronous output
+        """
+        return await self()
+
+    async def _setup(self):
+        """Setup the Task
+
+        This method will copy input files to work_dir
+        and dependencies output files to work_dir
+        """
+        if not _is_valid_input(self._input):
+            raise ValueError("Input should be a dictionary with string keys")
+
+        if self._input is None:
+            return
+
+        for _, inval in self._input.items():
+            if isinstance(inval, BaseEntry):
+                inval._copy_to_dest(self.work_dir)
+
+        dependent_tasks = []
+        for _, inval in self._input.items():
+            if isinstance(inval, BaseTask):
+                dependent_tasks.append(inval())
+        dependent_tasks_output = await asyncio.gather(*dependent_tasks)
+
+        for output in dependent_tasks_output:
+            for _, val in output.items():
+                if isinstance(val, BaseEntry):
+                    val.copy(self.work_dir)
 
     def _check_cache(self) -> bool:
         """
         Check if cache exists
         If corresponding hash directory or output files are not found return False
         """
-        if os.path.exists(TaskBase.CACHE_DIR / self.hash):
-            if isinstance(self._output, dict):
-                for i, _ in self._output.items():
-                    if not os.path.exists(TaskBase.CACHE_DIR / self.hash / i):
-                        return False
-                return True
+        if os.path.exists(self._cache_dir / self.hash):
+            return True
         return False
 
-    def _load_from_cache(self):
+    def _load_from_cache(self) -> OUTPUT:
         """
         Load output from cache,
 
             File, Directory: set cache_path
             str            : read from file
 
+        /key/data -> pickled data
+
         """
-        if not os.path.exists(TaskBase.CACHE_DIR / self.hash):
+        output = {}
+
+        if not os.path.exists(self._cache_dir / self.hash):
             raise FileNotFoundError(f"Cache for {self.hash} not found")
-        if not isinstance(self._output, dict):
-            raise ValueError("Output is not a dictionary")
 
-        for i, v in self._output.items():
-            if isinstance(v, File) or isinstance(v, Directory):
-                if not os.path.exists(TaskBase.CACHE_DIR / self.hash / i):
-                    raise FileNotFoundError(f"Cache for {i} not found")
-                v.cache_path = TaskBase.CACHE_DIR / self.hash / i
-            elif isinstance(v, str):
-                with open(TaskBase.CACHE_DIR / self.hash / i, "r") as f:
-                    self._output[i] = f.read()
+        for dir in os.listdir(self._cache_dir / self.hash):
+            output[dir] = pickle.load(
+                open(self._cache_dir / self.hash / dir / "data", "rb")
+            )
+        self._cached_output = cast(OUTPUT, output)
+        return self._cached_output
 
-    @property
-    def output(self) -> OUTPUT:
-        """
-        This attribute actually runs the task
-        """
-        if self._cached_output is not None:
-            return self._cached_output
-        outer_prev_path = None
-        if TaskBase._is_temporary:
-            outer_prev_path = os.getcwd()
-            TaskBase._is_temporary = False
-
-        if not os.path.exists(TaskBase.CACHE_DIR):
-            os.makedirs(TaskBase.CACHE_DIR)
-
-        # calculate hash
-        self.hash
-
-        if self._check_cache():
-            print(f"{self.__class__.__name__}: Cache found skipping ({self.hash})")
-            self._load_from_cache()
-        else:
-            print(f"{self.__class__.__name__}: Running task ({self.hash})")
-            self._task_setup()
-
-            # run task in work_dir
-            prev_path = os.getcwd()
-
-            os.chdir(self.work_dir)
-            TaskBase._is_temporary = True
-            self.task(self._input, self._output)
-            os.chdir(prev_path)
-            TaskBase._is_temporary = False
-
-            self._cache_output()
-
-        if outer_prev_path:
-            os.chdir(outer_prev_path)
-            TaskBase._is_temporary = True
-
-        self._cached_output = self._output
-
-        return self._output
-
-    def _cache_output(self):
-        if not isinstance(self._output, dict):
+    def _cache_output(self, output):
+        if not isinstance(output, dict):
             return
 
         # remove if exists
-        if os.path.exists(TaskBase.CACHE_DIR / self.hash):
-            shutil.rmtree(TaskBase.CACHE_DIR / self.hash)
+        if os.path.exists(self._cache_dir / self.hash):
+            shutil.rmtree(self._cache_dir / self.hash)
 
-        os.makedirs(TaskBase.CACHE_DIR / self.hash)
-        for i, v in self._output.items():
+        os.makedirs(self._cache_dir / self.hash)
+        for i, v in output.items():
             val: str | File = v
-            cache_path = TaskBase.CACHE_DIR / self.hash / i
-            if isinstance(val, File) or isinstance(val, Directory):
-                os.makedirs(TaskBase.CACHE_DIR / self.hash / i, exist_ok=True)
-                if not os.path.exists(self.work_dir / val.path):
-                    raise FileNotFoundError(f"{val.path} not found")
-                if not os.path.isabs(val.path):
-                    shutil.move(self.work_dir / val.path, cache_path)
-                val.cache_path = cache_path
-            elif isinstance(val, str):
+            cache_path: Path = self._cache_dir / self.hash / i
+            if isinstance(val, BaseEntry):
+                val._cache(cache_path)
+            elif _pickleable(val):
                 # save string to cache
-                os.makedirs(TaskBase.CACHE_DIR / self.hash, exist_ok=True)
-                with open(TaskBase.CACHE_DIR / self.hash / i, "w") as f:
-                    f.write(val)
+                os.makedirs(cache_path, exist_ok=True)
+                with open(cache_path / "data", "wb") as f:
+                    f.write(pickle.dumps(val))
 
     @property
     def hash(self):
@@ -218,32 +238,37 @@ class TaskBase[INPUT, OUTPUT](ABC):
         Calculate hash of the task
         Hash includes source code of the task and input text and file and directory content
         """
+        return md5(self._dump_input().encode()).hexdigest()
 
-        if self._hash is not None:
-            return self._hash
+    def _dump_input(self) -> str:
+        """
+        Dump input to as json string
 
-        hash = md5(getsource(self.task.__code__).encode())
+        """
 
-        # create hash with input
-        if isinstance(self._input, dict):
-            for i, v in self._input.items():
-                hash.update(i.encode())
-                if isinstance(v, File):
-                    with open(v.source_path, "rb") as f:
-                        content = f.read()
-                        hash.update(content)
+        if not _is_valid_input(self._input):
+            raise ValueError(
+                "Input should be a dictionary with string keys and have pickleable values"
+            )
 
-                if isinstance(v, Directory):
-                    _md5_update(hash, v.source_path)
+        ret_dict: dict[str, Any] = {
+            "__lazypp_task_source__": md5(
+                getsource(self.task.__code__).encode()
+            ).hexdigest(),
+        }
 
-                if isinstance(v, str):
-                    hash.update(v.encode())
+        if self._input is None:
+            return json.dumps(ret_dict)
 
-                if isinstance(v, TaskBase):
-                    hash.update(v.hash.encode())
+        for i, v in self._input.items():
+            if BaseTask in v.__class__.__mro__:
+                ret_dict[i] = v.hash
+            elif BaseEntry in v.__class__.__mro__:
+                ret_dict[i] = v._md5_hash().hexdigest()
+            else:
+                ret_dict[i] = md5(pickle.dumps(v)).hexdigest()
 
-        self._hash = hash.hexdigest()
-        return self._hash
+        return json.dumps(ret_dict)
 
     @property
     def work_dir(self):
