@@ -1,6 +1,8 @@
-import pytest
-from lazypp import BaseEntry, File, Directory
 from pathlib import Path
+
+import pytest
+
+from lazypp import BaseEntry, Directory, File
 
 
 def test_exceptions():

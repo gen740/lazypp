@@ -1,22 +1,25 @@
-from abc import ABC
-from collections import defaultdict
-import pickle
-from pickle import PicklingError
-from hashlib import md5
-import threading
-from inspect import getsource
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Any, TypeGuard, cast
+import asyncio
 import json
 import os
+import pickle
 import shutil
-import asyncio
+from abc import ABC
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import md5
+from inspect import getsource
+from pathlib import Path
+from pickle import PicklingError
+from tempfile import TemporaryDirectory
+from typing import Any, TypeGuard, cast
 
-from lazypp.worker import Worker
+from rich.console import Console
 
-from .file_objects import File, Directory, BaseEntry
+from .file_objects import BaseEntry, File
+
+console = Console(
+    log_path=False,
+)
 
 
 def _pickleable(obj):
@@ -68,7 +71,7 @@ def _is_valid_input(input: Any) -> TypeGuard[dict[str, Any] | None]:
     return True
 
 
-def _is_valid_output(output: Any) -> TypeGuard[dict[str, Any] | None]:
+def _is_valid_output(output: Any):
     """
     Validate output
 
@@ -101,6 +104,8 @@ class BaseTask[INPUT, OUTPUT](ABC):
         input: INPUT,
         worker: ThreadPoolExecutor | None = None,
         work_dir: str | Path | None = None,
+        show_input: bool = False,
+        show_output: bool = False,
     ):
         self._work_dir: Path | TemporaryDirectory | None = (
             Path(work_dir) if work_dir else None
@@ -109,6 +114,8 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._worker = worker
         self._cache_dir = Path(cache_dir)
         self._input = input
+        self._show_input = show_input
+        self._show_output = show_output
 
         self._hash: str | None = None
 
@@ -116,33 +123,70 @@ class BaseTask[INPUT, OUTPUT](ABC):
         _ = input
         raise NotImplementedError
 
+    def result(self) -> OUTPUT:
+        return asyncio.run(self())
+
     async def __call__(self) -> OUTPUT:
         async with BaseTask._global_locks[self.hash]:
             if self._cached_output is not None:
                 return self._cached_output
 
             if self._check_cache():
-                print(f"{self.__class__.__name__}: Cache found skipping ({self.hash})")
-                return self._load_from_cache()
+                output = self._load_from_cache()
+                if self._show_output:
+                    console.log(
+                        f"{self.__class__.__name__}: Cache found skipping",
+                    )
+                    console.log(
+                        f"{self.__class__.__name__}: Input",
+                        self._input,
+                    )
+                    console.log(
+                        f"{self.__class__.__name__}: Output",
+                        output,
+                    )
+                return output
 
             await self._setup()
 
             prev_dir = os.getcwd()
             os.chdir(self.work_dir)
 
-            print(f"{self.__class__.__name__}: Running task ({self.hash})")
             if self._worker is None:
+                console.log(f"{self.__class__.__name__}: Running with")
+                console.log(
+                    self._input,
+                )
                 output = await self.task(self._input)
             else:
-                loop = asyncio.get_event_loop()
-                output = await loop.run_in_executor(
-                    None, self.task, self._input
-                ).result()
 
+                def run_async_in_thread(async_func, *args, **kwargs):
+                    console.log(f"{self.__class__.__name__}: Running with")
+                    console.log(
+                        self._input,
+                    )
+                    return asyncio.run(async_func(*args, **kwargs))
+
+                loop = asyncio.get_event_loop()
+                output = loop.run_in_executor(
+                    self._worker, run_async_in_thread, self.task, self._input
+                )
+                output = await output
+
+            if not _is_valid_output(output):
+                raise ValueError(
+                    "Output should be a dictionary with string keys and have pickleable values"
+                )
             self._cache_output(output)
-            self.cache_output = output
+            self._cached_output = output
+
             os.chdir(prev_dir)
 
+        if self._show_output:
+            console.log(
+                f"{self.__class__.__name__}: Output",
+                output,
+            )
         return output
 
         # return self.output
@@ -240,7 +284,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         """
         return md5(self._dump_input().encode()).hexdigest()
 
-    def _dump_input(self) -> str:
+    def _dump_input(self, indent: bool | int = False) -> str:
         """
         Dump input to as json string
 
@@ -268,7 +312,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
             else:
                 ret_dict[i] = md5(pickle.dumps(v)).hexdigest()
 
-        return json.dumps(ret_dict)
+        return json.dumps(ret_dict, indent=indent)
 
     @property
     def work_dir(self):
@@ -281,9 +325,3 @@ class BaseTask[INPUT, OUTPUT](ABC):
         if isinstance(self._work_dir, TemporaryDirectory):
             return Path(self._work_dir.name)
         return self._work_dir
-
-    def __getitem__(self, key):
-        if not isinstance(self.output, dict):
-            raise KeyError("Output is not a dictionary")
-        else:
-            return self.output[key]

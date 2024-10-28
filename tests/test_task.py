@@ -1,9 +1,10 @@
-from lazypp import BaseTask, File, Directory
-from typing import TypedDict
-from lazypp.task import _is_valid_input, _is_valid_output
 import os
+from typing import TypedDict
+
 import pytest
 
+from lazypp import BaseTask, Directory, File
+from lazypp.task import _is_valid_input, _is_valid_output
 
 # def test_dump_task_input(tmpdir):
 #     class TestTaskBase[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
@@ -98,7 +99,7 @@ def test_task(tmpdir):
         output2: Directory
 
     class TestTask(BaseTask[TestInput, TestOutput]):
-        def task(self, input) -> TestOutput:
+        async def task(self, input) -> TestOutput:
             with open("output1.txt", "w") as f:
                 f.write(str(input["input1"]))
 

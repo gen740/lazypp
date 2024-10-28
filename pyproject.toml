@@ -6,8 +6,10 @@ build-backend = "setuptools.build_meta"
 readme = "README.md"
 authors = [{ name = "Gen Fujimoto" }]
 name = "lazypp"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Python package named lazypp"
+requires-python = ">=3.13"
+dependencies = ["rich"]
 
 [project.optional-dependencies]
 tests = ["pytest"]
@@ -18,3 +20,5 @@ include = ["lazypp*"]
 [tool.pytest.ini_options]
 addopts = "--color=yes"
 
+[tool.ruff.lint]
+extend-select = ["I"]

@@ -1,7 +1,7 @@
-from typing import TypedDict
-from lazypp import TaskBase, File
 from pathlib import Path
+from typing import TypedDict
 
+from lazypp import File, TaskBase
 
 TaskBase.change_cache_dir(str(Path(__file__).parent / "cache"))
 

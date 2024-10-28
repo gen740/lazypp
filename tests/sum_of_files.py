@@ -1,8 +1,19 @@
-from typing import TypedDict
-from lazypp import BaseTask, Directory, File
-from pathlib import Path
-import os
 import asyncio
+import os
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import TypedDict
+
+from lazypp import BaseTask, Directory, File
+
+
+class TestBaseTask[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
+    def __init__(self, input: INPUT):
+        super().__init__(
+            cache_dir=Path("cache").resolve(),
+            input=input,
+            worker=ThreadPoolExecutor(max_workers=4),
+        )
 
 
 class FInput(TypedDict):
@@ -14,7 +25,7 @@ class FOutput(TypedDict):
     files: Directory
 
 
-class CreateFiles(BaseTask[FInput, FOutput]):
+class CreateFiles(TestBaseTask[FInput, FOutput]):
     async def task(self, input):
         n = int(input["n"])
         delta = int(input["delta"])
@@ -30,12 +41,6 @@ class CreateFiles(BaseTask[FInput, FOutput]):
         return FOutput({"files": Directory(path="files")})
 
 
-create_files_task = CreateFiles(
-    input={"n": "28", "delta": "10"},
-    cache_dir=Path("cache").resolve(),
-)
-
-
 class SumInput(TypedDict):
     files: CreateFiles
 
@@ -45,7 +50,7 @@ class SumOutput(TypedDict):
     result_file: File
 
 
-class SumFiles(BaseTask[SumInput, SumOutput]):
+class SumFiles(TestBaseTask[SumInput, SumOutput]):
     async def task(self, input):
         files = os.listdir((await input["files"]())["files"].path)
         total = 0
@@ -61,10 +66,13 @@ class SumFiles(BaseTask[SumInput, SumOutput]):
 
 
 sum_files_task = SumFiles(
-    input={"files": create_files_task},
-    cache_dir=Path("cache").resolve(),
+    input={
+        "files": CreateFiles(
+            input={"n": "28", "delta": "10"},
+        )
+    },
 )
 
-# sum_files_task.output["result_file"].copy("out", dirs_exist_ok=True)
+print(sum_files_task.result())
 
-print(asyncio.run(sum_files_task()))
+sum_files_task.result()["result_file"].copy(Path("out"))

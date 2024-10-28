@@ -1,10 +1,10 @@
-from abc import ABC
+import os
+import pickle
 import shutil
+import tarfile
+from abc import ABC
 from hashlib import md5
 from pathlib import Path
-import pickle
-import tarfile
-import os
 
 
 def _is_outside_base(relative_path: Path) -> bool:
@@ -48,7 +48,10 @@ class BaseEntry(ABC):
         return self._src_path
 
     def __str__(self):
-        return str(self.path)
+        return str(self._src_path)
+
+    def __repr__(self):
+        return str(self._src_path)
 
     def _md5_hash(self):
         raise NotImplementedError
@@ -90,6 +93,7 @@ class File(BaseEntry):
             f.write(pickle.dumps(self))
 
     def copy(self, dest: Path):
+        os.makedirs((dest / self.path).parent, exist_ok=True)
         shutil.copy(self._src_path, dest / self.path)
 
 
@@ -121,6 +125,7 @@ class Directory(BaseEntry):
             f.write(pickle.dumps(self))
 
     def copy(self, dest: Path):
+        os.makedirs((dest / self.path).parent, exist_ok=True)
         shutil.copytree(self._src_path, dest / self.path)
 
 
