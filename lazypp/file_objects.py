@@ -1,7 +1,6 @@
 import os
 import pickle
 import shutil
-import tarfile
 from abc import ABC
 from hashlib import md5
 from pathlib import Path
@@ -65,6 +64,7 @@ class BaseEntry(ABC):
         raise NotImplementedError
 
     def copy(self, dest: Path):
+        _ = dest
         raise NotImplementedError
 
 

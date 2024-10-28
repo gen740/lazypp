@@ -1,57 +1,34 @@
+import asyncio
 from pathlib import Path
 from typing import TypedDict
 
-from lazypp import File, TaskBase
+from lazypp import BaseTask
 
-TaskBase.change_cache_dir(str(Path(__file__).parent / "cache"))
+
+class TestBaseTask[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
+    def __init__(self, input: INPUT):
+        super().__init__(
+            cache_dir=Path("cache").resolve(),
+            input=input,
+        )
 
 
 class Fin(TypedDict):
-    prefix: File
+    your_name: str
 
 
 class Fout(TypedDict):
-    hello_world: File
-    outtext: str
+    output: str
 
 
-class CreateFile(TaskBase[Fin, Fout]):
-    def task(self, input, output):
-        with open(input["prefix"].path, "r") as f:
-            content = f.read()
-
-        with open(output["hello_world"].path, "w") as f:
-            f.write(f"{content}Hello, World!")
-
-        output["outtext"] = "Chaged output"
+class Hello(TestBaseTask[Fin, Fout]):
+    async def task(self, input: Fin) -> Fout:
+        await asyncio.sleep(3)  # Some long running task
+        return {"output": f"Hello, {input['your_name']}"}
 
 
-ctask = CreateFile(
-    input={"prefix": File(path="prefix")},
-    output={"hello_world": File(path="hello"), "outtext": "Default output"},
+ctask = Hello(
+    input={"your_name": "John"},
 )
 
-
-class Fin2(TypedDict):
-    task1: CreateFile
-
-
-class Fout2(TypedDict):
-    out: str
-
-
-class ReadFileTask(TaskBase[Fin2, Fout2]):
-    def task(self, input, output):
-        print(self.work_dir)
-
-        with open(input["task1"]["hello_world"].dest_path, "r") as f:
-            content = f.read()
-
-        output["out"] = content
-
-
-rtask = ReadFileTask(input={"task1": ctask}, output={"out": "out"})
-
-out = rtask.output
-
-print(out)
+print(ctask.result())

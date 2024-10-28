@@ -133,14 +133,15 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
             if self._check_cache():
                 output = self._load_from_cache()
+                console.log(
+                    f"{self.__class__.__name__}: Cache found skipping",
+                )
                 if self._show_output:
-                    console.log(
-                        f"{self.__class__.__name__}: Cache found skipping",
-                    )
                     console.log(
                         f"{self.__class__.__name__}: Input",
                         self._input,
                     )
+                if self._show_output:
                     console.log(
                         f"{self.__class__.__name__}: Output",
                         output,
@@ -154,17 +155,19 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
             if self._worker is None:
                 console.log(f"{self.__class__.__name__}: Running with")
-                console.log(
-                    self._input,
-                )
+                if self._show_input:
+                    console.log(
+                        self._input,
+                    )
                 output = await self.task(self._input)
             else:
 
                 def run_async_in_thread(async_func, *args, **kwargs):
                     console.log(f"{self.__class__.__name__}: Running with")
-                    console.log(
-                        self._input,
-                    )
+                    if self._show_input:
+                        console.log(
+                            self._input,
+                        )
                     return asyncio.run(async_func(*args, **kwargs))
 
                 loop = asyncio.get_event_loop()
