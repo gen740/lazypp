@@ -1,5 +1,7 @@
+import asyncio
+import pickle
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TypedDict
 
@@ -7,7 +9,7 @@ from lazypp import BaseTask
 
 
 class TestBaseTask[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
-    _worker = ThreadPoolExecutor(max_workers=1)
+    _worker = ProcessPoolExecutor(max_workers=4)
 
     def __init__(self, input: INPUT):
         super().__init__(
@@ -30,7 +32,7 @@ class FOutput(TypedDict):
 
 
 class DoubleTheInputs(TestBaseTask[FInput, FOutput]):
-    async def task(self, input):
+    def task(self, input):
         time.sleep(1)
         return FOutput({"output1": input["input1"] * 2, "output2": input["input2"] * 2})
 
@@ -44,12 +46,12 @@ class SumOutput(TypedDict):
 
 
 class SumTask(TestBaseTask[SumInput, SumOutput]):
-    async def task(self, input):
+    def task(self, input):
         time.sleep(1)
         return SumOutput(
             {
-                "sum": (await input["double_the_inputs"]())["output1"]
-                + (await input["double_the_inputs"]())["output2"]
+                "sum": (input["double_the_inputs"].output)["output1"]
+                + (input["double_the_inputs"].output)["output2"]
             }
         )
 
@@ -63,12 +65,12 @@ class SubOutput(TypedDict):
 
 
 class SubTask(TestBaseTask[SubInput, SubOutput]):
-    async def task(self, input):
+    def task(self, input):
         time.sleep(1)
         return SubOutput(
             {
-                "sub": (await input["double_the_inputs"]())["output1"]
-                - (await input["double_the_inputs"]())["output2"]
+                "sub": (input["double_the_inputs"].output)["output1"]
+                - (input["double_the_inputs"].output)["output2"]
             }
         )
 
@@ -82,12 +84,12 @@ class MulOutput(TypedDict):
 
 
 class MulTask(TestBaseTask[MulInput, MulOutput]):
-    async def task(self, input):
+    def task(self, input):
         time.sleep(1)
         return MulOutput(
             {
-                "mul": (await input["double_the_inputs"]())["output1"]
-                * (await input["double_the_inputs"]())["output2"]
+                "mul": (input["double_the_inputs"].output)["output1"]
+                * (input["double_the_inputs"].output)["output2"]
             }
         )
 
@@ -101,12 +103,12 @@ class DivOutput(TypedDict):
 
 
 class DivTask(TestBaseTask[DivInput, DivOutput]):
-    async def task(self, input):
+    def task(self, input):
         time.sleep(1)
         return DivOutput(
             {
-                "div": (await input["double_the_inputs"]())["output1"]
-                / (await input["double_the_inputs"]())["output2"]
+                "div": (input["double_the_inputs"].output)["output1"]
+                / (input["double_the_inputs"].output)["output2"]
             }
         )
 
@@ -123,27 +125,30 @@ class SumAllOutput(TypedDict):
 
 
 class SumAllTask(TestBaseTask[SumAllInput, SumAllOutput]):
-    async def task(self, input):
+    def task(self, input):
         time.sleep(1)
         return SumAllOutput(
             {
-                "sum_all": (await input["sum"]())["sum"]
-                + (await input["sub"]())["sub"]
-                + (await input["mul"]())["mul"]
-                + (await input["div"]())["div"]
+                "sum_all": (input["sum"].output)["sum"]
+                + (input["sub"].output)["sub"]
+                + (input["mul"].output)["mul"]
+                + (input["div"].output)["div"]
             }
         )
 
 
 double_the_inputs_task = DoubleTheInputs(input={"input1": 8, "input2": 3})
 
-sum_all_task = SumAllTask(
-    input={
-        "sum": SumTask(input={"double_the_inputs": double_the_inputs_task}),
-        "sub": SubTask(input={"double_the_inputs": double_the_inputs_task}),
-        "mul": MulTask(input={"double_the_inputs": double_the_inputs_task}),
-        "div": DivTask(input={"double_the_inputs": double_the_inputs_task}),
-    }
-)
 
-print(sum_all_task.result())
+if __name__ == "__main__":
+    sum_all_task = SumAllTask(
+        input={
+            "sum": SumTask(input={"double_the_inputs": double_the_inputs_task}),
+            "sub": SubTask(input={"double_the_inputs": double_the_inputs_task}),
+            "mul": MulTask(input={"double_the_inputs": double_the_inputs_task}),
+            "div": DivTask(input={"double_the_inputs": double_the_inputs_task}),
+        }
+    )
+    # pickle.dump(sum_all_task, open("sum_all_task.pkl", "wb"))
+    # pickle.dump(asyncio.Lock(), open("test.pkl", "wb"))
+    print(sum_all_task.result())

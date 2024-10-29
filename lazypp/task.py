@@ -1,11 +1,13 @@
 import asyncio
+import contextlib
 import json
 import os
 import pickle
 import shutil
 from abc import ABC
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from hashlib import md5
 from inspect import getsource
 from pathlib import Path
@@ -21,16 +23,24 @@ console = Console(
     log_path=False,
 )
 
+_DEBUG = True
 
-def _pickleable(obj):
-    """
-    Check if object is pickable
-    """
-    try:
-        pickle.dumps(obj)
-        return True
-    except PicklingError:
-        return False
+
+def _run_in_another_process[INPUT, OUTPUT](
+    task: Callable[[INPUT], OUTPUT],
+    input: INPUT,
+    work_dir: Path,
+    show_input: bool,
+    class_name: str,
+) -> OUTPUT:
+    console.log(f"{class_name}: Running in {work_dir}")
+    if show_input:
+        console.log(
+            input,
+        )
+    with contextlib.chdir(work_dir):
+        ret = task(input)
+    return ret
 
 
 def _is_valid_input(input: Any) -> TypeGuard[dict[str, Any] | None]:
@@ -62,9 +72,7 @@ def _is_valid_input(input: Any) -> TypeGuard[dict[str, Any] | None]:
             return False
 
         if not (
-            BaseTask in val.__class__.__mro__
-            or BaseEntry in val.__class__.__mro__
-            or _pickleable(val)
+            BaseTask in val.__class__.__mro__ or BaseEntry in val.__class__.__mro__
         ):
             return False
 
@@ -89,7 +97,7 @@ def _is_valid_output(output: Any):
         if not isinstance(key, str):
             return False
 
-        if not (BaseEntry in val.__class__.__mro__ or _pickleable(val)):
+        if BaseEntry not in val.__class__.__mro__:
             return False
 
     return True
@@ -102,7 +110,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self,
         cache_dir: str | Path,
         input: INPUT,
-        worker: ThreadPoolExecutor | None = None,
+        worker: ProcessPoolExecutor | None = None,
         work_dir: str | Path | None = None,
         show_input: bool = False,
         show_output: bool = False,
@@ -119,7 +127,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
         self._hash: str | None = None
 
-    async def task(self, input: INPUT) -> OUTPUT:
+    def task(self, input: INPUT) -> OUTPUT:
         _ = input
         raise NotImplementedError
 
@@ -150,40 +158,35 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
             await self._setup()
 
-            prev_dir = os.getcwd()
-            os.chdir(self.work_dir)
-
             if self._worker is None:
                 console.log(f"{self.__class__.__name__}: Running with")
                 if self._show_input:
                     console.log(
                         self._input,
                     )
-                output = await self.task(self._input)
+                with contextlib.chdir(self.work_dir):
+                    output = self.task(self._input)
             else:
-
-                def run_async_in_thread(async_func, *args, **kwargs):
-                    console.log(f"{self.__class__.__name__}: Running with")
-                    if self._show_input:
-                        console.log(
-                            self._input,
-                        )
-                    return asyncio.run(async_func(*args, **kwargs))
-
                 loop = asyncio.get_event_loop()
                 output = loop.run_in_executor(
-                    self._worker, run_async_in_thread, self.task, self._input
+                    self._worker,
+                    _run_in_another_process,
+                    self.task,
+                    self._input,
+                    self.work_dir,
+                    self._show_input,
+                    self.__class__.__name__,
                 )
+
                 output = await output
 
             if not _is_valid_output(output):
                 raise ValueError(
                     "Output should be a dictionary with string keys and have pickleable values"
                 )
-            self._cache_output(output)
+            with contextlib.chdir(self.work_dir):
+                self._cache_output(output)
             self._cached_output = output
-
-            os.chdir(prev_dir)
 
         if self._show_output:
             console.log(
@@ -195,11 +198,13 @@ class BaseTask[INPUT, OUTPUT](ABC):
         # return self.output
 
     @property
-    async def output(self) -> OUTPUT:
+    def output(self) -> OUTPUT:
         """
         return synchronous output
         """
-        return await self()
+        if self._cached_output is not None:
+            return self._cached_output
+        raise ValueError("Output is not available")
 
     async def _setup(self):
         """Setup the Task
@@ -213,20 +218,22 @@ class BaseTask[INPUT, OUTPUT](ABC):
         if self._input is None:
             return
 
-        for _, inval in self._input.items():
-            if isinstance(inval, BaseEntry):
-                inval._copy_to_dest(self.work_dir)
+        with contextlib.chdir(self.work_dir):
+            for _, inval in self._input.items():
+                if isinstance(inval, BaseEntry):
+                    inval._copy_to_dest(self.work_dir)
 
         dependent_tasks = []
         for _, inval in self._input.items():
             if isinstance(inval, BaseTask):
-                dependent_tasks.append(inval())
+                dependent_tasks.append(asyncio.create_task(inval()))
         dependent_tasks_output = await asyncio.gather(*dependent_tasks)
 
-        for output in dependent_tasks_output:
-            for _, val in output.items():
-                if isinstance(val, BaseEntry):
-                    val.copy(self.work_dir)
+        with contextlib.chdir(self.work_dir):
+            for output in dependent_tasks_output:
+                for _, val in output.items():
+                    if isinstance(val, BaseEntry):
+                        val.copy(self.work_dir)
 
     def _check_cache(self) -> bool:
         """
@@ -268,16 +275,22 @@ class BaseTask[INPUT, OUTPUT](ABC):
             shutil.rmtree(self._cache_dir / self.hash)
 
         os.makedirs(self._cache_dir / self.hash)
-        for i, v in output.items():
-            val: str | File = v
-            cache_path: Path = self._cache_dir / self.hash / i
-            if isinstance(val, BaseEntry):
-                val._cache(cache_path)
-            elif _pickleable(val):
-                # save string to cache
-                os.makedirs(cache_path, exist_ok=True)
-                with open(cache_path / "data", "wb") as f:
-                    f.write(pickle.dumps(val))
+        if _DEBUG:
+            console.log(f"{self.__class__.__name__}: Caching output")
+        with contextlib.chdir(self.work_dir):
+            for i, v in output.items():
+                val: str | File = v
+                cache_path: Path = self._cache_dir / self.hash / i
+                if isinstance(val, BaseEntry):
+                    val._cache(cache_path)
+                else:
+                    # save string to cache
+                    os.makedirs(cache_path, exist_ok=True)
+                    with open(cache_path / "data", "wb") as f:
+                        f.write(pickle.dumps(val))
+
+        if _DEBUG:
+            console.log(f"{self.__class__.__name__}: Caching output done")
 
     @property
     def hash(self):
@@ -285,7 +298,13 @@ class BaseTask[INPUT, OUTPUT](ABC):
         Calculate hash of the task
         Hash includes source code of the task and input text and file and directory content
         """
-        return md5(self._dump_input().encode()).hexdigest()
+        if self._hash is None:
+            if _DEBUG:
+                console.log(f"{self.__class__.__name__}: Calculating hash")
+            self._hash = md5(self._dump_input().encode()).hexdigest()
+            if _DEBUG:
+                console.log(f"{self.__class__.__name__}: Calculating hash done")
+        return self._hash
 
     def _dump_input(self, indent: bool | int = False) -> str:
         """
@@ -328,3 +347,12 @@ class BaseTask[INPUT, OUTPUT](ABC):
         if isinstance(self._work_dir, TemporaryDirectory):
             return Path(self._work_dir.name)
         return self._work_dir
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # workerをNoneに置き換え
+        state["_worker"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)

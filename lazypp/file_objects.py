@@ -29,13 +29,14 @@ class BaseEntry(ABC):
         copy: bool = False,
         dest: str | Path | None = None,
     ):
-        self._copy = copy
+        if dest is not None:
+            self._copy = True
+        else:
+            self._copy = copy
+
         self._dest_path = Path(dest) if dest is not None else Path(path)
         self._src_path = Path(path)
         self._src_path = self._src_path.resolve()
-
-        if not self._src_path.exists():
-            raise FileNotFoundError(f"File not found: {self._src_path}")
 
         if _is_outside_base(self._dest_path):
             raise ValueError("File is outside base directory")
