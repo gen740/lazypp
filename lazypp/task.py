@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import pickle
 import shutil
+import uuid
 from abc import ABC
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -24,7 +26,7 @@ console = Console(
     log_path=False,
 )
 
-_DEBUG = True
+_DEBUG = False
 
 
 def _is_valid_input(input: Any) -> TypeGuard[dict[str, Any] | None]:
@@ -78,6 +80,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._show_input = show_input
         self._show_output = show_output
         self._hash: str | None = None
+        self._id = str(uuid.uuid4())
 
     def _log_input(self):
         if self._show_input:
@@ -101,9 +104,13 @@ class BaseTask[INPUT, OUTPUT](ABC):
         return asyncio.run(self())
 
     async def __call__(self) -> OUTPUT:
-        async with BaseTask._global_locks[self.hash]:
+        async with BaseTask._global_locks[
+            self._id
+        ]:  # Prevent same task called multiple times
             if self._output is not None:
                 return self._output
+
+            await self._setup()
 
             if self._check_cache():
                 self._output = self._load_from_cache()
@@ -114,8 +121,6 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 self._log_output()
                 return self._output
 
-            await self._setup()
-
             if self._worker is None:
                 self._output = self._run_task_in_workdir(self.work_dir)
             else:
@@ -123,9 +128,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 self._output = await loop.run_in_executor(
                     self._worker, self._run_task_in_workdir, self.work_dir
                 )
-
             self._cache_output()
-
             if not _is_valid_output(self._output):
                 raise ValueError(
                     "Output should be a dictionary with string keys and have pickleable values"
@@ -181,7 +184,6 @@ class BaseTask[INPUT, OUTPUT](ABC):
         dependent_tasks_output = await asyncio.gather(*dependent_tasks)
 
         # Restore output
-
         _call_func_on_specific_class(
             self._input,
             lambda output: output.restore_output(),
@@ -239,19 +241,22 @@ class BaseTask[INPUT, OUTPUT](ABC):
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Caching output done")
 
-    @property
-    def hash(self):
+    def calculate_hash(self):
         """
         Calculate hash of the task
         Hash includes source code of the task and input text and file and directory content
         """
+        if _DEBUG:
+            console.log(f"{self.__class__.__name__}: Calculating hash")
+        self._hash = md5(self._dump_input().encode()).hexdigest()
+        if _DEBUG:
+            console.log(f"{self.__class__.__name__}: Calculating hash done")
+
+    @property
+    def hash(self) -> str:
         if self._hash is None:
-            if _DEBUG:
-                console.log(f"{self.__class__.__name__}: Calculating hash")
-            self._hash = md5(self._dump_input().encode()).hexdigest()
-            if _DEBUG:
-                console.log(f"{self.__class__.__name__}: Calculating hash done")
-        return self._hash
+            self.calculate_hash()
+        return str(self._hash)
 
     def _dump_input(self, indent: bool | int = False) -> str:
         """
@@ -262,24 +267,21 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 "Input should be a dictionary with string keys and have pickleable values"
             )
 
-        ret_dict: dict[str, Any] = {
-            "__lazypp_task_source__": md5(
-                getsource(self.task.__code__).encode()
-            ).hexdigest(),
-        }
+        source_hash = md5(getsource(self.task.__code__).encode()).hexdigest()
 
         if self._input is None:
-            return json.dumps(ret_dict)
+            return json.dumps({"__lazypp_task_source__": source_hash})
 
-        for i, v in self._input.items():
-            if BaseTask in v.__class__.__mro__:
-                ret_dict[i] = v.hash
-            elif BaseEntry in v.__class__.__mro__:
-                ret_dict[i] = v._md5_hash().hexdigest()
-            else:
-                ret_dict[i] = md5(pickle.dumps(v)).hexdigest()
+        ret = copy.deepcopy(self._input)
 
-        return json.dumps(ret_dict, indent=indent)
+        _call_func_on_specific_class(
+            ret,
+            lambda entry: entry._md5_hash().hexdigest(),
+            BaseEntry,
+        )
+        ret["__lazypp_task_source__"] = source_hash
+
+        return json.dumps(ret, indent=indent)
 
     @property
     def work_dir(self):
@@ -332,26 +334,3 @@ def _call_func_on_specific_class[T](
 
     call_func_inner(obj)
     return obj
-
-
-def task[INPUT, OUTPUT](
-    input: type[INPUT],
-    output: type[OUTPUT],
-    cache_dir: str | Path,
-    worker: ProcessPoolExecutor | None = None,
-):
-    def decorator(fun: Callable[[INPUT], OUTPUT]) -> type[BaseTask[INPUT, OUTPUT]]:
-        class _Task(BaseTask[INPUT, OUTPUT]):
-            def __init__(self, input: INPUT):
-                super().__init__(
-                    cache_dir=cache_dir,
-                    worker=worker,
-                    input=input,
-                )
-
-            def task(self, input: INPUT) -> OUTPUT:
-                return fun(input)
-
-        return _Task
-
-    return decorator

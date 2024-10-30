@@ -94,8 +94,13 @@ class File(BaseEntry):
         with open(cache_dir / "data", "wb") as f:
             f.write(pickle.dumps(self))
 
-    def copy(self, dest: Path):
+    def copy(self, dest: Path, overwrite: bool = False):
         os.makedirs((dest / self.path).parent, exist_ok=True)
+        if os.path.exists(dest / self.path):
+            if not overwrite:
+                raise FileExistsError(f"{dest / self.path} already exists")
+            else:
+                os.remove(dest / self.path)
         shutil.copy(self._src_path, dest / self.path)
 
 
@@ -119,10 +124,6 @@ class Directory(BaseEntry):
         cache_path = cache_dir / self._md5_hash().hexdigest()
         os.makedirs(cache_path.parent, exist_ok=True)
 
-        print("##################")
-        print(self._src_path)
-        print(self._dest_path)
-
         shutil.copytree(work_dir / self._dest_path, cache_path)
         self._src_path = cache_path
 
@@ -130,6 +131,11 @@ class Directory(BaseEntry):
         with open(cache_dir / "data", "wb") as f:
             f.write(pickle.dumps(self))
 
-    def copy(self, dest: Path):
+    def copy(self, dest: Path, overwrite: bool = False):
         os.makedirs((dest / self.path).parent, exist_ok=True)
+        if os.path.exists(dest / self.path):
+            if not overwrite:
+                raise FileExistsError(f"{dest / self.path} already exists")
+            else:
+                shutil.rmtree(dest / self.path)
         shutil.copytree(self._src_path, dest / self.path)

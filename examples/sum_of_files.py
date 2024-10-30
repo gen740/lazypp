@@ -4,7 +4,10 @@ from pathlib import Path
 from typing import TypedDict
 
 import lazypp
+import lazypp.task
 from lazypp import BaseTask, Directory, File
+
+lazypp.task._DEBUG = True
 
 WORKER = ProcessPoolExecutor(max_workers=4)
 
@@ -16,7 +19,7 @@ class TestBaseTask[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
         super().__init__(
             cache_dir=Path("cache").resolve(),
             input=input,
-            # worker=TestBaseTask._worker,
+            worker=TestBaseTask._worker,
         )
 
 
@@ -30,7 +33,7 @@ class FOutput(TypedDict):
 
 
 class CreateFiles(TestBaseTask[FInput, FOutput]):
-    def task(self, input):
+    def task(self, input) -> FOutput:
         n = int(input["n"])
         delta = int(input["delta"])
 
@@ -43,24 +46,7 @@ class CreateFiles(TestBaseTask[FInput, FOutput]):
                 f.write(str(content))
             content += delta
 
-        return FOutput({"files": Directory(path="files")})
-
-
-# @lazypp.task(FInput, FOutput, cache_dir=Path("cache").resolve(), worker=WORKER)
-# def CreateFiles(input):
-#     n = int(input["n"])
-#     delta = int(input["delta"])
-#
-#     if not os.path.exists("files"):
-#         os.mkdir("files")
-#
-#     content = 0
-#     for i in range(0, n):
-#         with open(f"files/file_{i}.txt", "w") as f:
-#             f.write(str(content))
-#         content += delta
-#
-#     return FOutput({"files": Directory(path="files")})
+        return {"files": Directory(path="files")}
 
 
 class SumInput(TypedDict):

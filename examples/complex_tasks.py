@@ -3,14 +3,15 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TypedDict
 
+import numpy as np
+
 from lazypp import BaseTask, File
 
 cache_dir = Path("cache").resolve()
-worker = ProcessPoolExecutor(max_workers=4)
+worker = ProcessPoolExecutor(max_workers=8)
 
 
 class TestBaseTask[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
-
     def __init__(self, input: INPUT):
         super().__init__(
             cache_dir=cache_dir,
@@ -27,180 +28,292 @@ class CreateFileInputParameters(TypedDict):
     delta: int
 
 
-class FInput(TypedDict):
+### Create File Task
+class CreateFileInput(TypedDict):
     param: CreateFileInputParameters
 
 
-class FOutput(TypedDict):
-    output: list[File]
+class CreateFileOutput(TypedDict):
+    files: list[File]
+    values: list[int]
 
 
-class CreateFileTask(TestBaseTask[FInput, FOutput]):
-    def task(self, input):
-        time.sleep(1)
+class CreateFileTask(TestBaseTask[CreateFileInput, CreateFileOutput]):
+    def task(self, input) -> CreateFileOutput:
+        time.sleep(0.2)
         files = []
+        values = []
         for i in range(
             input["param"]["min"], input["param"]["max"], input["param"]["delta"]
         ):
             with open(f"file_{i}.txt", "w") as f:
-                f.write(f"file_{i}")
+                f.write(f"value: {i}")
             files.append(File(f"file_{i}.txt"))
-        return FOutput({"output": files})
+            values.append(i)
+        return {"files": files, "values": values}
+
+
+### Summation Task
+class SummationInput(TypedDict):
+    files: list[File]
+    shift: int
+
+
+class SummationOutput(TypedDict):
+    files: list[File]
+    values: list[int]
+
+
+class SummationTask(TestBaseTask[SummationInput, SummationOutput]):
+    def task(self, input) -> SummationOutput:
+        time.sleep(0.2)
+        values = []
+        files = []
+        for i, file in enumerate(input["files"]):
+            with open(file.path, "r") as f:
+                content = f.read()
+                val = int(content.split(":")[1].strip())
+            with open(f"{self.hash}_output_{i}.txt", "w") as f:
+                f.write(f"value: {val + input["shift"]}")
+            values.append(val + input["shift"])
+
+        for i in range(len(input["files"])):
+            files.append(File(f"{self.hash}_output_{i}.txt"))
+        return {"files": files, "values": values}
+
+
+### Subtraction Task
+class SubtractInput(TypedDict):
+    files: list[File]
+    subtrahend: int
+
+
+class SubtractOutput(TypedDict):
+    files: list[File]
+    values: list[int]
+
+
+class SubtractTask(TestBaseTask[SubtractInput, SubtractOutput]):
+    def task(self, input) -> SubtractOutput:
+        time.sleep(0.2)
+        values = []
+        files = []
+        for i, file in enumerate(input["files"]):
+            with open(file.path, "r") as f:
+                content = f.read()
+                val = int(content.split(":")[1].strip())
+            with open(f"{self.hash}_output_{i}.txt", "w") as f:
+                f.write(f"value: {val - input["subtrahend"]}")
+            values.append(val - input["subtrahend"])
+
+        for i in range(len(input["files"])):
+            files.append(File(f"{self.hash}_output_{i}.txt"))
+        return {"files": files, "values": values}
 
 
 ### Multiplier Task
-class MultiplierInput(TypedDict):
+class MultiplyInput(TypedDict):
     files: list[File]
     multiplier: int
 
 
-class MultiplierOutput(TypedDict):
+class MultiplyOutput(TypedDict):
+    files: list[File]
+    values: list[int]
+
+
+class MultiplyTask(TestBaseTask[MultiplyInput, MultiplyOutput]):
+    def task(self, input) -> MultiplyOutput:
+        time.sleep(0.2)
+        values = []
+        files = []
+        for i, file in enumerate(input["files"]):
+            with open(file.path, "r") as f:
+                content = f.read()
+                val = int(content.split(":")[1].strip())
+            with open(f"{self.hash}_output_{i}.txt", "w") as f:
+                f.write(f"value: {val * input["multiplier"]}")
+            values.append(val * input["multiplier"])
+
+        for i in range(len(input["files"])):
+            files.append(File(f"{self.hash}_output_{i}.txt"))
+        return {"files": files, "values": values}
+
+
+### Summation All Task
+class SummationAllInput(TypedDict):
     files: list[File]
 
 
-class MultiplierTask(TestBaseTask[MultiplierInput, MultiplierOutput]):
-    def task(self, input):
-        time.sleep(1)
+class SummationAllOutput(TypedDict):
+    file: File
+    value: int
+
+
+class SummationAllTask(TestBaseTask[SummationAllInput, SummationAllOutput]):
+    def task(self, input) -> SummationAllOutput:
+        time.sleep(0.2)
+        value = 0
         for file in input["files"]:
             with open(file.path, "r") as f:
                 content = f.read()
-            with open(file.path, "w") as f:
-                f.write(content * input["multiplier"])
-        return MultiplierOutput({"files": input["files"]})
+                val = int(content.split(":")[1].strip())
+            value += val
+        with open(f"{self.hash}_output.txt", "w") as f:
+            f.write(f"value: {value}")
+        return {"file": File(f"{self.hash}_output.txt"), "value": value}
+
+
+class TaskParameters(TypedDict):
+    plus: int
+    sub: int
+    mul: int
+
+
+def task(min: int, max: int, delta: int, multiplier: int, params: TaskParameters):
+    v1 = np.arange(min, max, delta)
+    v2 = multiplier * v1
+
+    added_v1 = v1 + params["plus"]
+    added_v2 = v2 + params["plus"]
+
+    sub_v1 = v1 - params["sub"]
+    sub_v2 = v2 - params["sub"]
+
+    mul_v1 = v1 * params["mul"]
+    mul_v2 = v2 * params["mul"]
+
+    sum_added_v1 = sum(added_v1)
+    sum_added_v2 = sum(added_v2)
+
+    sum_sub_v1 = sum(sub_v1)
+    sum_sub_v2 = sum(sub_v2)
+
+    sum_mul_v1 = sum(mul_v1)
+    sum_mul_v2 = sum(mul_v2)
+
+    sum_all = sum(
+        [sum_added_v1, sum_added_v2, sum_sub_v1, sum_sub_v2, sum_mul_v1, sum_mul_v2]
+    )
+
+    return {
+        "v1": v1,
+        "v2": v2,
+        "added_v1": added_v1,
+        "added_v2": added_v2,
+        "sub_v1": sub_v1,
+        "sub_v2": sub_v2,
+        "mul_v1": mul_v1,
+        "mul_v2": mul_v2,
+        "sum_added_v1": sum_added_v1,
+        "sum_added_v2": sum_added_v2,
+        "sum_sub_v1": sum_sub_v1,
+        "sum_sub_v2": sum_sub_v2,
+        "sum_mul_v1": sum_mul_v1,
+        "sum_mul_v2": sum_mul_v2,
+        "sum_all": sum_all,
+    }
 
 
 def main():
-    create_file_task = CreateFileTask(
-        input={"param": {"min": 0, "max": 15, "delta": 3}}
+    task_params = {
+        "min": 0,
+        "max": 10,
+        "delta": 2,
+        "multiplier": 2,
+        "params": {"plus": 3, "sub": 5, "mul": 3},
+    }
+
+    expected_output = task(**task_params)
+
+    v1_task = CreateFileTask(
+        input={
+            "param": {
+                "min": task_params["min"],
+                "max": task_params["max"],
+                "delta": task_params["delta"],
+            }
+        }
     )
 
-    multiplier_task = MultiplierTask(
-        input={"files": create_file_task.output["output"], "multiplier": 2}
+    v2_task = MultiplyTask(
+        input={
+            "files": v1_task.output["files"],
+            "multiplier": task_params["multiplier"],
+        }
     )
 
-    output = multiplier_task.result()
+    added_v1_task = SummationTask(
+        input={"files": v1_task.output["files"], "shift": task_params["params"]["plus"]}
+    )
+    added_v2_task = SummationTask(
+        input={"files": v2_task.output["files"], "shift": task_params["params"]["plus"]}
+    )
 
-    output["files"][2].copy(Path("output.txt"))
+    sub_v1_task = SubtractTask(
+        input={
+            "files": v1_task.output["files"],
+            "subtrahend": task_params["params"]["sub"],
+        }
+    )
+    sub_v2_task = SubtractTask(
+        input={
+            "files": v2_task.output["files"],
+            "subtrahend": task_params["params"]["sub"],
+        }
+    )
+
+    mul_v1_task = MultiplyTask(
+        input={
+            "files": v1_task.output["files"],
+            "multiplier": task_params["params"]["mul"],
+        }
+    )
+    mul_v2_task = MultiplyTask(
+        input={
+            "files": v2_task.output["files"],
+            "multiplier": task_params["params"]["mul"],
+        }
+    )
+
+    sum_added_v1_task = SummationAllTask(input={"files": added_v1_task.output["files"]})
+    sum_added_v2_task = SummationAllTask(input={"files": added_v2_task.output["files"]})
+
+    sum_sub_v1_task = SummationAllTask(input={"files": sub_v1_task.output["files"]})
+    sum_sub_v2_task = SummationAllTask(input={"files": sub_v2_task.output["files"]})
+
+    sum_mul_v1_task = SummationAllTask(input={"files": mul_v1_task.output["files"]})
+    sum_mul_v2_task = SummationAllTask(input={"files": mul_v2_task.output["files"]})
+
+    sum_all_task = SummationAllTask(
+        input={
+            "files": [
+                sum_added_v1_task.output["file"],
+                sum_added_v2_task.output["file"],
+                sum_sub_v1_task.output["file"],
+                sum_sub_v2_task.output["file"],
+                sum_mul_v1_task.output["file"],
+                sum_mul_v2_task.output["file"],
+            ]
+        }
+    )
+
+    assert v1_task.result()["values"] == list(expected_output["v1"])
+    assert v2_task.result()["values"] == list(expected_output["v2"])
+    assert added_v1_task.result()["values"] == list(expected_output["added_v1"])
+    assert added_v2_task.result()["values"] == list(expected_output["added_v2"])
+    assert sub_v1_task.result()["values"] == list(expected_output["sub_v1"])
+    assert sub_v2_task.result()["values"] == list(expected_output["sub_v2"])
+    assert mul_v1_task.result()["values"] == list(expected_output["mul_v1"])
+    assert mul_v2_task.result()["values"] == list(expected_output["mul_v2"])
+    assert sum_added_v1_task.result()["value"] == expected_output["sum_added_v1"]
+    assert sum_added_v2_task.result()["value"] == expected_output["sum_added_v2"]
+    assert sum_sub_v1_task.result()["value"] == expected_output["sum_sub_v1"]
+    assert sum_sub_v2_task.result()["value"] == expected_output["sum_sub_v2"]
+    assert sum_mul_v1_task.result()["value"] == expected_output["sum_mul_v1"]
+    assert sum_mul_v2_task.result()["value"] == expected_output["sum_mul_v2"]
+    assert sum_all_task.result()["value"] == expected_output["sum_all"]
 
 
-# class DoubleTheInputs(TestBaseTask[]):
-#     def task(self, input):
-#         time.sleep(1)
-#         return FOutput({"output1": input["input1"] * 2, "output2": input["input2"] * 2})
-#
-#
-# class SumInput(TypedDict):
-#     double_the_inputs: DoubleTheInputs
-#
-#
-# class SumOutput(TypedDict):
-#     sum: float
-#
-#
-# class SumTask(TestBaseTask[SumInput, SumOutput]):
-#     def task(self, input):
-#         time.sleep(1)
-#         return SumOutput(
-#             {
-#                 "sum": (input["double_the_inputs"].output)["output1"]
-#                 + (input["double_the_inputs"].output)["output2"]
-#             }
-#         )
-#
-#
-# class SubInput(TypedDict):
-#     double_the_inputs: DoubleTheInputs
-#
-#
-# class SubOutput(TypedDict):
-#     sub: float
-#
-#
-# class SubTask(TestBaseTask[SubInput, SubOutput]):
-#     def task(self, input):
-#         time.sleep(1)
-#         return SubOutput(
-#             {
-#                 "sub": (input["double_the_inputs"].output)["output1"]
-#                 - (input["double_the_inputs"].output)["output2"]
-#             }
-#         )
-#
-#
-# class MulInput(TypedDict):
-#     double_the_inputs: DoubleTheInputs
-#
-#
-# class MulOutput(TypedDict):
-#     mul: float
-#
-#
-# class MulTask(TestBaseTask[MulInput, MulOutput]):
-#     def task(self, input):
-#         time.sleep(1)
-#         return MulOutput(
-#             {
-#                 "mul": (input["double_the_inputs"].output)["output1"]
-#                 * (input["double_the_inputs"].output)["output2"]
-#             }
-#         )
-#
-#
-# class DivInput(TypedDict):
-#     double_the_inputs: DoubleTheInputs
-#
-#
-# class DivOutput(TypedDict):
-#     div: float
-#
-#
-# class DivTask(TestBaseTask[DivInput, DivOutput]):
-#     def task(self, input):
-#         time.sleep(1)
-#         return DivOutput(
-#             {
-#                 "div": (input["double_the_inputs"].output)["output1"]
-#                 / (input["double_the_inputs"].output)["output2"]
-#             }
-#         )
-#
-#
-# class SumAllInput(TypedDict):
-#     sum: SumTask
-#     sub: SubTask
-#     mul: MulTask
-#     div: DivTask
-#
-#
-# class SumAllOutput(TypedDict):
-#     sum_all: float
-#
-#
-# class SumAllTask(TestBaseTask[SumAllInput, SumAllOutput]):
-#     def task(self, input):
-#         time.sleep(1)
-#         return SumAllOutput(
-#             {
-#                 "sum_all": (input["sum"].output)["sum"]
-#                 + (input["sub"].output)["sub"]
-#                 + (input["mul"].output)["mul"]
-#                 + (input["div"].output)["div"]
-#             }
-#         )
-#
-#
-# double_the_inputs_task = DoubleTheInputs(input={"input1": 8, "input2": 3})
-#
-# if __name__ == "__main__":
-#     sum_all_task = SumAllTask(
-#         input={
-#             "sum": SumTask(input={"double_the_inputs": double_the_inputs_task}),
-#             "sub": SubTask(input={"double_the_inputs": double_the_inputs_task}),
-#             "mul": MulTask(input={"double_the_inputs": double_the_inputs_task}),
-#             "div": DivTask(input={"double_the_inputs": double_the_inputs_task}),
-#         }
-#     )
-#
-#     print(sum_all_task.result())
 if __name__ == "__main__":
     main()
