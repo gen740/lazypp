@@ -35,8 +35,7 @@ class BaseEntry(ABC):
             self._copy = copy
 
         self._dest_path = Path(dest) if dest is not None else Path(path)
-        self._src_path = Path(path)
-        self._src_path = self._src_path.resolve()
+        self._src_path = Path(path).resolve()
 
         if _is_outside_base(self._dest_path):
             raise ValueError("File is outside base directory")
@@ -48,10 +47,10 @@ class BaseEntry(ABC):
         return self._src_path
 
     def __str__(self):
-        return str(self._src_path)
+        return f"<{self.__class__.__name__}: {str(self._src_path)} -> {str(self._dest_path)}>"
 
     def __repr__(self):
-        return str(self._src_path)
+        return f"<{self.__class__.__name__}: {str(self._src_path)} -> {str(self._dest_path)}>"
 
     def _md5_hash(self):
         raise NotImplementedError
@@ -60,8 +59,8 @@ class BaseEntry(ABC):
         _ = work_dir
         raise NotImplementedError
 
-    def _cache(self, cache_dir: Path):
-        _ = cache_dir
+    def _cache(self, work_dir: Path, cache_dir: Path):
+        _ = work_dir, cache_dir
         raise NotImplementedError
 
     def copy(self, dest: Path):
@@ -81,13 +80,15 @@ class File(BaseEntry):
         if self._copy:
             self.copy(work_dir)
 
-    def _cache(self, cache_dir: Path):
+    def _cache(self, work_dir: Path, cache_dir: Path):
         """Cache file to cache directory"""
-        dest = cache_dir / self._md5_hash().hexdigest()
-        os.makedirs(dest.parent, exist_ok=True)
+        cach_path = cache_dir / self._md5_hash().hexdigest()
+        os.makedirs(cach_path.parent, exist_ok=True)
 
-        shutil.copy(self._dest_path, cache_dir / self._md5_hash().hexdigest())
-        self._src_path = dest
+        shutil.copy(
+            work_dir / self._dest_path, cache_dir / self._md5_hash().hexdigest()
+        )
+        self._src_path = cach_path
 
         # save self instance to cache directory
         with open(cache_dir / "data", "wb") as f:
@@ -113,13 +114,17 @@ class Directory(BaseEntry):
         if self._copy:
             self.copy(work_dir)
 
-    def _cache(self, cache_dir: Path):
+    def _cache(self, work_dir: Path, cache_dir: Path):
         """Cache directory to cache directory"""
-        dest = cache_dir / self._md5_hash().hexdigest()
-        os.makedirs(dest.parent, exist_ok=True)
+        cache_path = cache_dir / self._md5_hash().hexdigest()
+        os.makedirs(cache_path.parent, exist_ok=True)
 
-        shutil.copytree(self._dest_path, dest)
-        self._src_path = dest
+        print("##################")
+        print(self._src_path)
+        print(self._dest_path)
+
+        shutil.copytree(work_dir / self._dest_path, cache_path)
+        self._src_path = cache_path
 
         # save self instance to cache directory
         with open(cache_dir / "data", "wb") as f:
@@ -128,10 +133,3 @@ class Directory(BaseEntry):
     def copy(self, dest: Path):
         os.makedirs((dest / self.path).parent, exist_ok=True)
         shutil.copytree(self._src_path, dest / self.path)
-
-
-def load_from_cache(path: Path) -> BaseEntry:
-    with open(path / "data", "rb") as f:
-        obj = pickle.load(f)
-
-    return obj

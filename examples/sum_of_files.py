@@ -1,18 +1,22 @@
-import asyncio
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TypedDict
 
+import lazypp
 from lazypp import BaseTask, Directory, File
+
+WORKER = ProcessPoolExecutor(max_workers=4)
 
 
 class TestBaseTask[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
+    _worker = ProcessPoolExecutor(max_workers=4)
+
     def __init__(self, input: INPUT):
         super().__init__(
             cache_dir=Path("cache").resolve(),
             input=input,
-            worker=ThreadPoolExecutor(max_workers=4),
+            # worker=TestBaseTask._worker,
         )
 
 
@@ -26,7 +30,7 @@ class FOutput(TypedDict):
 
 
 class CreateFiles(TestBaseTask[FInput, FOutput]):
-    async def task(self, input):
+    def task(self, input):
         n = int(input["n"])
         delta = int(input["delta"])
 
@@ -38,7 +42,25 @@ class CreateFiles(TestBaseTask[FInput, FOutput]):
             with open(f"files/file_{i}.txt", "w") as f:
                 f.write(str(content))
             content += delta
+
         return FOutput({"files": Directory(path="files")})
+
+
+# @lazypp.task(FInput, FOutput, cache_dir=Path("cache").resolve(), worker=WORKER)
+# def CreateFiles(input):
+#     n = int(input["n"])
+#     delta = int(input["delta"])
+#
+#     if not os.path.exists("files"):
+#         os.mkdir("files")
+#
+#     content = 0
+#     for i in range(0, n):
+#         with open(f"files/file_{i}.txt", "w") as f:
+#             f.write(str(content))
+#         content += delta
+#
+#     return FOutput({"files": Directory(path="files")})
 
 
 class SumInput(TypedDict):
@@ -51,11 +73,11 @@ class SumOutput(TypedDict):
 
 
 class SumFiles(TestBaseTask[SumInput, SumOutput]):
-    async def task(self, input):
-        files = os.listdir((await input["files"]())["files"].path)
+    def task(self, input):
+        files = os.listdir(input["files"].output["files"].path)
         total = 0
         for file in files:
-            with open(f"{(await input['files']())["files"].path}/{file}", "r") as f:
+            with open(f"{input['files'].output["files"].path}/{file}", "r") as f:
                 total += int(f.read())
         sum = str(total)
 
@@ -65,14 +87,13 @@ class SumFiles(TestBaseTask[SumInput, SumOutput]):
         return SumOutput({"sum": sum, "result_file": File(path="result.txt")})
 
 
-sum_files_task = SumFiles(
-    input={
-        "files": CreateFiles(
-            input={"n": "28", "delta": "10"},
-        )
-    },
-)
+if __name__ == "__main__":
+    sum_files_task = SumFiles(
+        input={
+            "files": CreateFiles(
+                input={"n": "28", "delta": "10"},
+            )
+        },
+    )
 
-print(sum_files_task.result())
-
-sum_files_task.result()["result_file"].copy(Path("out"))
+    print(sum_files_task.result())

@@ -6,32 +6,26 @@ from lazypp import BaseEntry, Directory, File
 
 
 def test_exceptions():
-    file = BaseEntry("data")
+    file = BaseEntry("tests/data")
 
     with pytest.raises(NotImplementedError):
         file._md5_hash()
-
-    with pytest.raises(FileNotFoundError):
-        File("data/hello3.txt")
-
-    with pytest.raises(FileNotFoundError):
-        Directory("data2")
 
     with pytest.raises(ValueError):
         File("../lazypp/__init__.py")
 
     with pytest.raises(ValueError):
-        File("data/hello1.txt", dest="../dest_hello.txt")
+        File("tests/data/hello1.txt", dest="../dest_hello.txt")
 
 
 def test_hash():
-    file1 = File("data/hello1.txt")
-    file2 = File("data/hello2.txt")
+    file1 = File("tests/data/hello1.txt")
+    file2 = File("tests/data/hello2.txt")
 
     assert file1._md5_hash().hexdigest() != file2._md5_hash().hexdigest()
 
-    dir1 = Directory("data/foo1")
-    dir2 = Directory("data/foo2")
+    dir1 = Directory("tests/data/foo1")
+    dir2 = Directory("tests/data/foo2")
 
     assert dir1._md5_hash().hexdigest() != dir2._md5_hash().hexdigest()
 

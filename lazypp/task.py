@@ -6,18 +6,19 @@ import pickle
 import shutil
 from abc import ABC
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from hashlib import md5
 from inspect import getsource
 from pathlib import Path
-from pickle import PicklingError
 from tempfile import TemporaryDirectory
-from typing import Any, TypeGuard, cast
+from typing import Any, Callable, TypeGuard, cast
 
 from rich.console import Console
 
-from .file_objects import BaseEntry, File
+import lazypp.dummy_output
+
+from .file_objects import BaseEntry
 
 console = Console(
     log_path=False,
@@ -26,78 +27,29 @@ console = Console(
 _DEBUG = True
 
 
-def _run_in_another_process[INPUT, OUTPUT](
-    task: Callable[[INPUT], OUTPUT],
-    input: INPUT,
-    work_dir: Path,
-    show_input: bool,
-    class_name: str,
-) -> OUTPUT:
-    console.log(f"{class_name}: Running in {work_dir}")
-    if show_input:
-        console.log(
-            input,
-        )
-    with contextlib.chdir(work_dir):
-        ret = task(input)
-    return ret
-
-
 def _is_valid_input(input: Any) -> TypeGuard[dict[str, Any] | None]:
-    """
-    Validate input
-
-    key should be string
-    value is BaseEntry, BaseTask or pickleable object
-
-    or Map of these
-
-    str
-    int
-    float
-    BaseEntry
-    BaseTask
-
-    or Map / Sequence of these
-
-    """
     if input is None:
         return True
 
     if not isinstance(input, dict):
         return False
 
-    for key, val in input.items():
+    for key in input:
         if not isinstance(key, str):
-            return False
-
-        if not (
-            BaseTask in val.__class__.__mro__ or BaseEntry in val.__class__.__mro__
-        ):
             return False
 
     return True
 
 
-def _is_valid_output(output: Any):
-    """
-    Validate output
-
-    key should be string
-
-    value should be File, Directory, str or pickleable object
-    """
-    if output is None:
+def _is_valid_output[OUTPUT](input: OUTPUT | None) -> TypeGuard[OUTPUT]:
+    if input is None:
         return True
 
-    if not isinstance(output, dict):
+    if not isinstance(input, dict):
         return False
 
-    for key, val in output.items():
+    for key in input:
         if not isinstance(key, str):
-            return False
-
-        if BaseEntry not in val.__class__.__mro__:
             return False
 
     return True
@@ -108,6 +60,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
     def __init__(
         self,
+        *,
         cache_dir: str | Path,
         input: INPUT,
         worker: ProcessPoolExecutor | None = None,
@@ -118,14 +71,27 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._work_dir: Path | TemporaryDirectory | None = (
             Path(work_dir) if work_dir else None
         )
-        self._cached_output: OUTPUT | None = None
         self._worker = worker
         self._cache_dir = Path(cache_dir)
         self._input = input
+        self._output: OUTPUT | None = None
         self._show_input = show_input
         self._show_output = show_output
-
         self._hash: str | None = None
+
+    def _log_input(self):
+        if self._show_input:
+            console.log(
+                f"{self.__class__.__name__}: Input",
+                self._input,
+            )
+
+    def _log_output(self):
+        if self._show_output:
+            console.log(
+                f"{self.__class__.__name__}: Output",
+                self._output,
+            )
 
     def task(self, input: INPUT) -> OUTPUT:
         _ = input
@@ -136,75 +102,52 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
     async def __call__(self) -> OUTPUT:
         async with BaseTask._global_locks[self.hash]:
-            if self._cached_output is not None:
-                return self._cached_output
+            if self._output is not None:
+                return self._output
 
             if self._check_cache():
-                output = self._load_from_cache()
+                self._output = self._load_from_cache()
                 console.log(
                     f"{self.__class__.__name__}: Cache found skipping",
                 )
-                if self._show_output:
-                    console.log(
-                        f"{self.__class__.__name__}: Input",
-                        self._input,
-                    )
-                if self._show_output:
-                    console.log(
-                        f"{self.__class__.__name__}: Output",
-                        output,
-                    )
-                return output
+                self._log_input()
+                self._log_output()
+                return self._output
 
             await self._setup()
 
             if self._worker is None:
-                console.log(f"{self.__class__.__name__}: Running with")
-                if self._show_input:
-                    console.log(
-                        self._input,
-                    )
-                with contextlib.chdir(self.work_dir):
-                    output = self.task(self._input)
+                self._output = self._run_task_in_workdir(self.work_dir)
             else:
                 loop = asyncio.get_event_loop()
-                output = loop.run_in_executor(
-                    self._worker,
-                    _run_in_another_process,
-                    self.task,
-                    self._input,
-                    self.work_dir,
-                    self._show_input,
-                    self.__class__.__name__,
+                self._output = await loop.run_in_executor(
+                    self._worker, self._run_task_in_workdir, self.work_dir
                 )
 
-                output = await output
+            self._cache_output()
 
-            if not _is_valid_output(output):
+            if not _is_valid_output(self._output):
                 raise ValueError(
                     "Output should be a dictionary with string keys and have pickleable values"
                 )
-            with contextlib.chdir(self.work_dir):
-                self._cache_output(output)
-            self._cached_output = output
 
-        if self._show_output:
-            console.log(
-                f"{self.__class__.__name__}: Output",
-                output,
-            )
-        return output
+            self._log_output()
+            return self._output
 
-        # return self.output
+    def _run_task_in_workdir(self, work_dir: Path) -> OUTPUT:
+        console.log(f"{self.__class__.__name__}: Running in {work_dir}")
+        self._log_input()
+        with contextlib.chdir(work_dir):
+            return self.task(self._input)
 
     @property
     def output(self) -> OUTPUT:
         """
         return synchronous output
         """
-        if self._cached_output is not None:
-            return self._cached_output
-        raise ValueError("Output is not available")
+        if self._output is not None:
+            return self._output
+        return cast(OUTPUT, lazypp.dummy_output.DummyOutput(self))
 
     async def _setup(self):
         """Setup the Task
@@ -218,22 +161,39 @@ class BaseTask[INPUT, OUTPUT](ABC):
         if self._input is None:
             return
 
-        with contextlib.chdir(self.work_dir):
-            for _, inval in self._input.items():
-                if isinstance(inval, BaseEntry):
-                    inval._copy_to_dest(self.work_dir)
+        _call_func_on_specific_class(
+            self._input,
+            lambda entry: entry._copy_to_dest(self.work_dir),
+            BaseEntry,
+        )
 
         dependent_tasks = []
-        for _, inval in self._input.items():
-            if isinstance(inval, BaseTask):
-                dependent_tasks.append(asyncio.create_task(inval()))
+        _call_func_on_specific_class(
+            self._input,
+            lambda task: dependent_tasks.append(asyncio.create_task(task())),
+            BaseTask,
+        )
+        _call_func_on_specific_class(
+            self._input,
+            lambda output: dependent_tasks.append(asyncio.create_task(output.task())),
+            lazypp.dummy_output.DummyOutput,
+        )
         dependent_tasks_output = await asyncio.gather(*dependent_tasks)
 
-        with contextlib.chdir(self.work_dir):
-            for output in dependent_tasks_output:
-                for _, val in output.items():
-                    if isinstance(val, BaseEntry):
-                        val.copy(self.work_dir)
+        # Restore output
+
+        _call_func_on_specific_class(
+            self._input,
+            lambda output: output.restore_output(),
+            lazypp.dummy_output.DummyOutput,
+        )
+
+        for output in dependent_tasks_output:
+            _call_func_on_specific_class(
+                output,
+                lambda entry: entry.copy(self.work_dir),
+                BaseEntry,
+            )
 
     def _check_cache(self) -> bool:
         """
@@ -247,28 +207,17 @@ class BaseTask[INPUT, OUTPUT](ABC):
     def _load_from_cache(self) -> OUTPUT:
         """
         Load output from cache,
-
-            File, Directory: set cache_path
-            str            : read from file
-
-        /key/data -> pickled data
-
+        unpickle "cache_dir/hash/data" file and return the output
         """
-        output = {}
-
         if not os.path.exists(self._cache_dir / self.hash):
             raise FileNotFoundError(f"Cache for {self.hash} not found")
+        return cast(
+            OUTPUT, pickle.load(open(self._cache_dir / self.hash / "data", "rb"))
+        )
 
-        for dir in os.listdir(self._cache_dir / self.hash):
-            output[dir] = pickle.load(
-                open(self._cache_dir / self.hash / dir / "data", "rb")
-            )
-        self._cached_output = cast(OUTPUT, output)
-        return self._cached_output
-
-    def _cache_output(self, output):
-        if not isinstance(output, dict):
-            return
+    def _cache_output(self):
+        if not _is_valid_output(self._output):
+            raise ValueError("Output should be a dictionary with string keys")
 
         # remove if exists
         if os.path.exists(self._cache_dir / self.hash):
@@ -277,17 +226,15 @@ class BaseTask[INPUT, OUTPUT](ABC):
         os.makedirs(self._cache_dir / self.hash)
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Caching output")
-        with contextlib.chdir(self.work_dir):
-            for i, v in output.items():
-                val: str | File = v
-                cache_path: Path = self._cache_dir / self.hash / i
-                if isinstance(val, BaseEntry):
-                    val._cache(cache_path)
-                else:
-                    # save string to cache
-                    os.makedirs(cache_path, exist_ok=True)
-                    with open(cache_path / "data", "wb") as f:
-                        f.write(pickle.dumps(val))
+
+        _call_func_on_specific_class(
+            self._output,
+            lambda entry: entry._cache(self.work_dir, self._cache_dir / self.hash),
+            BaseEntry,
+        )
+
+        with open(self._cache_dir / self.hash / "data", "wb") as f:
+            f.write(pickle.dumps(self._output))
 
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Caching output done")
@@ -309,9 +256,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
     def _dump_input(self, indent: bool | int = False) -> str:
         """
         Dump input to as json string
-
         """
-
         if not _is_valid_input(self._input):
             raise ValueError(
                 "Input should be a dictionary with string keys and have pickleable values"
@@ -350,9 +295,63 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        # workerをNoneに置き換え
-        state["_worker"] = None
+        state["_worker"] = None  # worker is not picklable
+        state["_work_dir"] = None
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+
+
+def _call_func_on_specific_class[T](
+    obj: Any, func: Callable[[T], Any], t: type[T]
+) -> Any:
+    visited = set()
+
+    def call_func_inner(inner_obj: Any, parent: Any = None, key: Any = None) -> None:
+        if id(inner_obj) in visited:
+            return
+        visited.add(id(inner_obj))
+
+        if isinstance(inner_obj, t):
+            if parent is not None:
+                parent[key] = func(inner_obj) or inner_obj
+            return
+
+        if isinstance(inner_obj, Mapping):
+            for k, v in inner_obj.items():
+                call_func_inner(v, inner_obj, k)
+        elif isinstance(inner_obj, Sequence) and not isinstance(
+            inner_obj, (str, bytes, bytearray)
+        ):
+            for i, v in enumerate(inner_obj):
+                call_func_inner(v, inner_obj, i)
+
+    if isinstance(obj, t):
+        return func(obj) or obj
+
+    call_func_inner(obj)
+    return obj
+
+
+def task[INPUT, OUTPUT](
+    input: type[INPUT],
+    output: type[OUTPUT],
+    cache_dir: str | Path,
+    worker: ProcessPoolExecutor | None = None,
+):
+    def decorator(fun: Callable[[INPUT], OUTPUT]) -> type[BaseTask[INPUT, OUTPUT]]:
+        class _Task(BaseTask[INPUT, OUTPUT]):
+            def __init__(self, input: INPUT):
+                super().__init__(
+                    cache_dir=cache_dir,
+                    worker=worker,
+                    input=input,
+                )
+
+            def task(self, input: INPUT) -> OUTPUT:
+                return fun(input)
+
+        return _Task
+
+    return decorator
