@@ -5,7 +5,6 @@ import json
 import os
 import pickle
 import shutil
-import uuid
 from abc import ABC
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -77,10 +76,18 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._cache_dir = Path(cache_dir)
         self._input = input
         self._output: OUTPUT | None = None
+        self._output_lock = asyncio.Lock()
         self._show_input = show_input
         self._show_output = show_output
         self._hash: str | None = None
-        self._id = str(uuid.uuid4())
+        self._upstream_results: list[Any] | None = None
+
+    def task(self, input: INPUT) -> OUTPUT:
+        _ = input
+        raise NotImplementedError
+
+    def result(self) -> OUTPUT:
+        return asyncio.run(self())
 
     def _log_input(self):
         if self._show_input:
@@ -96,86 +103,12 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 self._output,
             )
 
-    def task(self, input: INPUT) -> OUTPUT:
-        _ = input
-        raise NotImplementedError
-
-    def result(self) -> OUTPUT:
-        return asyncio.run(self())
-
-    async def __call__(self) -> OUTPUT:
-        async with BaseTask._global_locks[
-            self._id
-        ]:  # Prevent same task called multiple times
-            if self._output is not None:
-                return self._output
-
-            await self._setup()
-
-            if self._worker is not None:
-                loop = asyncio.get_event_loop()
-                self._hash = await loop.run_in_executor(
-                    self._worker, self.calculate_hash
-                )
-
-            async with BaseTask._global_locks[self.hash]:
-                if self._check_cache():
-                    self._output = self._load_from_cache()
-                    console.log(
-                        f"{self.__class__.__name__}: Cache found skipping",
-                    )
-                    self._log_input()
-                    self._log_output()
-                    return self._output
-
-                if self._worker is None:
-                    self._output = self._run_task_in_workdir(self.work_dir)
-                else:
-                    loop = asyncio.get_event_loop()
-                    self._output = await loop.run_in_executor(
-                        self._worker, self._run_task_in_workdir, self.work_dir
-                    )
-                self._cache_output()
-                if not _is_valid_output(self._output):
-                    raise ValueError(
-                        "Output should be a dictionary with string keys and have pickleable values"
-                    )
-
-                self._log_output()
-                return self._output
-
-    def _run_task_in_workdir(self, work_dir: Path) -> OUTPUT:
-        console.log(f"{self.__class__.__name__}: Running in {work_dir}")
-        self._log_input()
-        with contextlib.chdir(work_dir):
-            return self.task(copy.deepcopy(self._input))
-
-    @property
-    def output(self) -> OUTPUT:
-        """
-        return synchronous output
-        """
-        if self._output is not None:
-            return self._output
-        return cast(OUTPUT, lazypp.dummy_output.DummyOutput(self))
-
-    async def _setup(self):
-        """Setup the Task
-
-        This method will copy input files to work_dir
-        and dependencies output files to work_dir
-        """
-        if not _is_valid_input(self._input):
-            raise ValueError("Input should be a dictionary with string keys")
-
-        if self._input is None:
+    async def _collect_upstream_results(self):
+        if self._upstream_results is not None:
             return
-
-        _call_func_on_specific_class(
-            self._input,
-            lambda entry: entry._copy_to_dest(self.work_dir),
-            BaseEntry,
-        )
+        elif self._input is None:
+            self._upstream_results = []
+            return
 
         dependent_tasks = []
         _call_func_on_specific_class(
@@ -188,21 +121,96 @@ class BaseTask[INPUT, OUTPUT](ABC):
             lambda output: dependent_tasks.append(asyncio.create_task(output.task())),
             lazypp.dummy_output.DummyOutput,
         )
-        dependent_tasks_output = await asyncio.gather(*dependent_tasks)
-
-        # Restore output
+        self._upstream_results = await asyncio.gather(*dependent_tasks)
         _call_func_on_specific_class(
             self._input,
             lambda output: output.restore_output(),
             lazypp.dummy_output.DummyOutput,
         )
 
-        for output in dependent_tasks_output:
+    async def _setup_workdir(self):
+        """Setup the Task
+
+        This method will copy input files to work_dir and dependencies output files to work_dir
+        This method should be called before running the task
+        """
+        if self._input is None:
+            return
+        elif self._upstream_results is None:
+            raise ValueError("Upstream results are not collected")
+
+        # Restore output
+        _call_func_on_specific_class(
+            self._input,
+            lambda entry: entry._copy_to_dest(self.work_dir),
+            BaseEntry,
+        )
+        for output in self._upstream_results:
             _call_func_on_specific_class(
                 output,
-                lambda entry: entry.copy(self.work_dir),
+                lambda entry: entry._copy_to_dest(self.work_dir),
                 BaseEntry,
             )
+
+    async def __call__(self) -> OUTPUT:
+        async with self._output_lock:
+            if self._output is not None:
+                return self._output
+
+            await self._collect_upstream_results()
+
+            async with BaseTask._global_locks[await self.get_hash()]:
+                if self._check_cache():
+                    self._output = self._load_from_cache()
+                    console.log(
+                        f"{self.__class__.__name__}: Cache found skipping",
+                    )
+                    self._log_input()
+                    self._log_output()
+                    return self._output
+                if self._worker is None:
+                    await self._setup_workdir()
+                    self._output = self._run_task_in_workdir(self.work_dir)
+                else:
+                    await self._setup_workdir()
+                    loop = asyncio.get_event_loop()
+                    self._output = await loop.run_in_executor(
+                        self._worker, self._run_task_in_workdir, self.work_dir
+                    )
+            self._cache_output()
+            if not _is_valid_output(self._output):
+                raise ValueError(
+                    "Output should be a dictionary with string keys and have pickleable values"
+                )
+            self._log_output()
+            return self._output
+
+    async def get_hash(self) -> str:
+        if self._hash is not None:
+            return self._hash
+        if self._worker is not None:
+            loop = asyncio.get_event_loop()
+            self._hash = str(
+                await loop.run_in_executor(self._worker, self._calculate_hash)
+            )
+        else:
+            self._hash = self._calculate_hash()
+        return self._hash
+
+    def _run_task_in_workdir(self, work_dir: Path) -> OUTPUT:
+        with contextlib.chdir(work_dir):
+            console.log(f"{self.__class__.__name__}: Running in {os.getcwd()}")
+            self._log_input()
+            return self.task(copy.deepcopy(self._input))
+
+    @property
+    def output(self) -> OUTPUT:
+        """
+        return synchronous output
+        """
+        if self._output is not None:
+            return self._output
+        return cast(OUTPUT, lazypp.dummy_output.DummyOutput(self))
 
     def _check_cache(self) -> bool:
         """
@@ -248,19 +256,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Caching output done")
 
-    def calculate_hash(self):
-        """
-        Calculate hash of the task
-        Hash includes source code of the task and input text and file and directory content
-        """
-        if _DEBUG:
-            console.log(f"{self.__class__.__name__}: Calculating hash")
-        res = md5(self._dump_input().encode()).hexdigest()
-        if _DEBUG:
-            console.log(f"{self.__class__.__name__}: Calculating hash done")
-        return res
-
-    async def async_calculate_hash(self):
+    def _calculate_hash(self):
         """
         Calculate hash of the task
         Hash includes source code of the task and input text and file and directory content
@@ -275,7 +271,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
     @property
     def hash(self) -> str:
         if self._hash is None:
-            self._hash = self.calculate_hash()
+            raise ValueError("Hash is not calculated. Run the task to calculate hash")
         return str(self._hash)
 
     def _dump_input(self, indent: bool | int = False) -> str:
@@ -288,7 +284,6 @@ class BaseTask[INPUT, OUTPUT](ABC):
             )
 
         source_hash = md5(getsource(self.task.__code__).encode()).hexdigest()
-
         if self._input is None:
             return json.dumps({"__lazypp_task_source__": source_hash})
 
@@ -305,7 +300,6 @@ class BaseTask[INPUT, OUTPUT](ABC):
             lambda task: task.hash,
             BaseTask,
         )
-
         return json.dumps(ret, indent=indent)
 
     @property
@@ -323,10 +317,12 @@ class BaseTask[INPUT, OUTPUT](ABC):
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_worker"] = None  # worker is not picklable
+        state["_output_lock"] = None  # lock is not picklable
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self._output_lock = asyncio.Lock()
 
 
 def _call_func_on_specific_class[T](

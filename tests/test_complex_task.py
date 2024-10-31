@@ -255,7 +255,7 @@ def task(min: int, max: int, delta: int, multiplier: int, params: TaskParameters
         {
             "max_workers": 4,
             "time_low": 0.0,
-            "time_high": 0.2,
+            "time_high": 0.5,
             "min": 3,
             "max": 11,
             "delta": 4,

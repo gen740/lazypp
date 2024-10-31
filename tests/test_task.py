@@ -21,11 +21,17 @@ from lazypp.task import _is_valid_input
                 "input5": {"a": 1, "b": 2},
             },
         ),
-        (True, {"input": File("data/hello1.txt"), "input2": Directory("data/foo1")}),
         (
             True,
             {
-                "input": [File("data/hello1.txt"), File("data/hello2.txt")],
+                "input": File("tests/data/hello1.txt"),
+                "input2": Directory("tests/data/foo1"),
+            },
+        ),
+        (
+            True,
+            {
+                "input": [File("tests/data/hello1.txt"), File("tests/data/hello2.txt")],
                 "input2": Directory("data/foo1"),
             },
         ),
@@ -70,8 +76,8 @@ def test_basic(tmpdir):
 
     print(tmpdir)
 
-    output["output1"].copy(Path(tmpdir) / "out")
-    output["output2"].copy(Path(tmpdir) / "out")
+    output["output1"].copy(Path(tmpdir) / "out" / "output1.txt")
+    output["output2"].copy(Path(tmpdir) / "out" / "output2")
 
     with open(tmpdir / "out/output1.txt") as f:
         assert f.read() == "1"
