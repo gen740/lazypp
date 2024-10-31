@@ -98,6 +98,12 @@ class File(BaseEntry):
         os.makedirs((dest / self.path).parent, exist_ok=True)
         if os.path.exists(dest / self.path):
             if not overwrite:
+                # Check the file is same
+                if (
+                    self._md5_hash().hexdigest()
+                    == File(dest / self.path)._md5_hash().hexdigest()
+                ):
+                    return
                 raise FileExistsError(f"{dest / self.path} already exists")
             else:
                 os.remove(dest / self.path)
@@ -135,6 +141,12 @@ class Directory(BaseEntry):
         os.makedirs((dest / self.path).parent, exist_ok=True)
         if os.path.exists(dest / self.path):
             if not overwrite:
+                # Check the directory is same
+                if (
+                    self._md5_hash().hexdigest()
+                    == Directory(dest / self.path)._md5_hash().hexdigest()
+                ):
+                    return
                 raise FileExistsError(f"{dest / self.path} already exists")
             else:
                 shutil.rmtree(dest / self.path)

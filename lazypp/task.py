@@ -112,36 +112,43 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
             await self._setup()
 
-            if self._check_cache():
-                self._output = self._load_from_cache()
-                console.log(
-                    f"{self.__class__.__name__}: Cache found skipping",
+            if self._worker is not None:
+                loop = asyncio.get_event_loop()
+                self._hash = await loop.run_in_executor(
+                    self._worker, self.calculate_hash
                 )
-                self._log_input()
+
+            async with BaseTask._global_locks[self.hash]:
+                if self._check_cache():
+                    self._output = self._load_from_cache()
+                    console.log(
+                        f"{self.__class__.__name__}: Cache found skipping",
+                    )
+                    self._log_input()
+                    self._log_output()
+                    return self._output
+
+                if self._worker is None:
+                    self._output = self._run_task_in_workdir(self.work_dir)
+                else:
+                    loop = asyncio.get_event_loop()
+                    self._output = await loop.run_in_executor(
+                        self._worker, self._run_task_in_workdir, self.work_dir
+                    )
+                self._cache_output()
+                if not _is_valid_output(self._output):
+                    raise ValueError(
+                        "Output should be a dictionary with string keys and have pickleable values"
+                    )
+
                 self._log_output()
                 return self._output
-
-            if self._worker is None:
-                self._output = self._run_task_in_workdir(self.work_dir)
-            else:
-                loop = asyncio.get_event_loop()
-                self._output = await loop.run_in_executor(
-                    self._worker, self._run_task_in_workdir, self.work_dir
-                )
-            self._cache_output()
-            if not _is_valid_output(self._output):
-                raise ValueError(
-                    "Output should be a dictionary with string keys and have pickleable values"
-                )
-
-            self._log_output()
-            return self._output
 
     def _run_task_in_workdir(self, work_dir: Path) -> OUTPUT:
         console.log(f"{self.__class__.__name__}: Running in {work_dir}")
         self._log_input()
         with contextlib.chdir(work_dir):
-            return self.task(self._input)
+            return self.task(copy.deepcopy(self._input))
 
     @property
     def output(self) -> OUTPUT:
@@ -202,7 +209,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         Check if cache exists
         If corresponding hash directory or output files are not found return False
         """
-        if os.path.exists(self._cache_dir / self.hash):
+        if os.path.exists(self._cache_dir / self.hash / "data"):
             return True
         return False
 
@@ -248,14 +255,27 @@ class BaseTask[INPUT, OUTPUT](ABC):
         """
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Calculating hash")
-        self._hash = md5(self._dump_input().encode()).hexdigest()
+        res = md5(self._dump_input().encode()).hexdigest()
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Calculating hash done")
+        return res
+
+    async def async_calculate_hash(self):
+        """
+        Calculate hash of the task
+        Hash includes source code of the task and input text and file and directory content
+        """
+        if _DEBUG:
+            console.log(f"{self.__class__.__name__}: Calculating hash")
+        res = md5(self._dump_input().encode()).hexdigest()
+        if _DEBUG:
+            console.log(f"{self.__class__.__name__}: Calculating hash done")
+        return res
 
     @property
     def hash(self) -> str:
         if self._hash is None:
-            self.calculate_hash()
+            self._hash = self.calculate_hash()
         return str(self._hash)
 
     def _dump_input(self, indent: bool | int = False) -> str:
@@ -274,12 +294,17 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
         ret = copy.deepcopy(self._input)
 
+        ret["__lazypp_task_source__"] = source_hash
         _call_func_on_specific_class(
             ret,
             lambda entry: entry._md5_hash().hexdigest(),
             BaseEntry,
         )
-        ret["__lazypp_task_source__"] = source_hash
+        _call_func_on_specific_class(
+            ret,
+            lambda task: task.hash,
+            BaseTask,
+        )
 
         return json.dumps(ret, indent=indent)
 
@@ -298,7 +323,6 @@ class BaseTask[INPUT, OUTPUT](ABC):
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_worker"] = None  # worker is not picklable
-        state["_work_dir"] = None
         return state
 
     def __setstate__(self, state):
