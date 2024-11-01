@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 readme = "README.md"
 authors = [{ name = "Gen Fujimoto" }]
 name = "lazypp"
-version = "0.1.3"
+version = "0.2.0"
 description = "A Python package named lazypp"
 requires-python = ">=3.11"
-dependencies = ["rich"]
+dependencies = ["rich", "xxhash"]
 
 [project.optional-dependencies]
 tests = ["pytest"]
