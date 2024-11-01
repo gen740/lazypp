@@ -9,13 +9,13 @@ from abc import ABC
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from hashlib import md5
 from inspect import getsource
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, TypeGuard, cast
 
 from rich.console import Console
+from xxhash import xxh128
 
 import lazypp.dummy_output
 
@@ -263,7 +263,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         """
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Calculating hash")
-        res = md5(self._dump_input().encode()).hexdigest()
+        res = xxh128(self._dump_input().encode()).hexdigest()
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Calculating hash done")
         return res
@@ -283,7 +283,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 "Input should be a dictionary with string keys and have pickleable values"
             )
 
-        source_hash = md5(getsource(self.task.__code__).encode()).hexdigest()
+        source_hash = xxh128(getsource(self.task.__code__).encode()).hexdigest()
         if self._input is None:
             return json.dumps({"__lazypp_task_source__": source_hash})
 
@@ -292,7 +292,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         ret["__lazypp_task_source__"] = source_hash
         _call_func_on_specific_class(
             ret,
-            lambda entry: entry._md5_hash().hexdigest(),
+            lambda entry: entry._xxh128_hash().hexdigest(),
             BaseEntry,
         )
         _call_func_on_specific_class(

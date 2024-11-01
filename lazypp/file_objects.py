@@ -1,10 +1,10 @@
-import hashlib
 import os
 import pickle
 import shutil
 from abc import ABC
-from hashlib import md5
 from pathlib import Path
+
+from xxhash import xxh128
 
 
 def _is_outside_base(relative_path: Path) -> bool:
@@ -34,6 +34,7 @@ class BaseEntry(ABC):
         *,
         copy: bool = False,
         dest: str | Path | None = None,
+        allow_overwrite: bool = False,
     ):
         self._copy = copy
 
@@ -46,8 +47,9 @@ class BaseEntry(ABC):
             raise ValueError("File is outside base directory")
         self._src_path = Path(path).resolve()
         self._dest_path = (
-            Path(dest) if dest is not None else Path(self._md5_hash().hexdigest())
+            Path(dest) if dest is not None else Path(self._xxh128_hash().hexdigest())
         )
+        self._allow_overwrite = allow_overwrite
 
     @property
     def path(self):
@@ -59,7 +61,7 @@ class BaseEntry(ABC):
     def __repr__(self):
         return f"<{self.__class__.__name__}: {str(self._src_path)} -> {str(self._dest_path)}>"
 
-    def _md5_hash(self) -> "hashlib._Hash":
+    def _xxh128_hash(self) -> xxh128:
         raise NotImplementedError
 
     def _copy_to_dest(self, work_dir: Path):
@@ -80,8 +82,8 @@ class BaseEntry(ABC):
 
 
 class File(BaseEntry):
-    def _md5_hash(self):
-        ret = md5()
+    def _xxh128_hash(self):
+        ret = xxh128()
         with open(self._src_path, "rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 ret.update(chunk)
@@ -95,16 +97,16 @@ class File(BaseEntry):
 
     def _cache(self, work_dir: Path, cache_dir: Path):
         """Cache file to cache directory"""
-        cach_path = cache_dir / self._md5_hash().hexdigest()
+        cach_path = cache_dir / self._xxh128_hash().hexdigest()
         os.makedirs(cach_path.parent, exist_ok=True)
         if os.path.islink(work_dir / self._src_path):
             shutil.copy(
                 os.readlink(work_dir / self._src_path),
-                cache_dir / self._md5_hash().hexdigest(),
+                cache_dir / self._xxh128_hash().hexdigest(),
             )
         else:
             shutil.copy(
-                work_dir / self._src_path, cache_dir / self._md5_hash().hexdigest()
+                work_dir / self._src_path, cache_dir / self._xxh128_hash().hexdigest()
             )
         self._src_path = cach_path
 
@@ -115,7 +117,7 @@ class File(BaseEntry):
     def copy(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
         if os.path.exists(dest):
-            if not overwrite:
+            if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
                 os.remove(dest)
@@ -124,7 +126,7 @@ class File(BaseEntry):
     def link(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
         if os.path.exists(dest):
-            if not overwrite:
+            if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
                 os.remove(dest)
@@ -132,8 +134,8 @@ class File(BaseEntry):
 
 
 class Directory(BaseEntry):
-    def _md5_hash(self):
-        ret = md5()
+    def _xxh128_hash(self):
+        ret = xxh128()
         for root, _, files in os.walk(self._src_path):
             for file in files:
                 file_path = os.path.join(root, file)
@@ -150,7 +152,7 @@ class Directory(BaseEntry):
 
     def _cache(self, work_dir: Path, cache_dir: Path):
         """Cache directory to cache directory"""
-        cache_path = cache_dir / self._md5_hash().hexdigest()
+        cache_path = cache_dir / self._xxh128_hash().hexdigest()
         os.makedirs(cache_path.parent, exist_ok=True)
 
         if os.path.islink(work_dir / self._src_path):
@@ -166,17 +168,23 @@ class Directory(BaseEntry):
     def copy(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
         if os.path.exists(dest):
-            if not overwrite:
+            if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
-                os.remove(dest)
+                if os.path.islink(dest):
+                    os.remove(dest)
+                else:
+                    shutil.rmtree(dest)
         shutil.copytree(self._src_path, dest)
 
     def link(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
         if os.path.exists(dest):
-            if not overwrite:
+            if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
-                os.remove(dest)
+                if os.path.islink(dest):
+                    os.remove(dest)
+                else:
+                    shutil.rmtree(dest)
         os.symlink(self._src_path, dest)
