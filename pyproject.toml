@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 readme = "README.md"
-authors = [{ name = "Gen Fujimoto" }]
+authors = [{ name = "Gen740" }]
 name = "lazypp"
 version = "0.2.0"
 description = "A Python package named lazypp"

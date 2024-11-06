@@ -1,10 +1,9 @@
 import os
-import pickle
 import shutil
 from abc import ABC
 from pathlib import Path
 
-from xxhash import xxh128
+from xxhash import xxh128, xxh32, xxh64
 
 
 def _is_outside_base(relative_path: Path) -> bool:
@@ -20,6 +19,9 @@ def _is_outside_base(relative_path: Path) -> bool:
         if depth < 0:
             return True
     return False
+
+
+_CHUNK_SIZE = 64 * 1024
 
 
 class BaseEntry(ABC):
@@ -85,7 +87,7 @@ class File(BaseEntry):
     def _xxh128_hash(self):
         ret = xxh128()
         with open(self._src_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
+            for chunk in iter(lambda: f.read(_CHUNK_SIZE), b""):
                 ret.update(chunk)
         return ret
 
@@ -110,13 +112,9 @@ class File(BaseEntry):
             )
         self._src_path = cach_path
 
-        # save self instance to cache directory
-        with open(cache_dir / "data", "wb") as f:
-            f.write(pickle.dumps(self))
-
     def copy(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
-        if os.path.exists(dest):
+        if os.path.exists(dest) or os.path.islink(dest):
             if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
@@ -125,11 +123,14 @@ class File(BaseEntry):
 
     def link(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
-        if os.path.exists(dest):
+        if os.path.exists(dest) or os.path.islink(dest):
             if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
-                os.remove(dest)
+                if os.path.islink(dest):
+                    os.unlink(dest)
+                else:
+                    os.remove(dest)
         os.symlink(self._src_path, dest)
 
 
@@ -140,7 +141,7 @@ class Directory(BaseEntry):
             for file in files:
                 file_path = os.path.join(root, file)
                 with open(file_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(4096), b""):
+                    for chunk in iter(lambda: f.read(_CHUNK_SIZE), b""):
                         ret.update(chunk)
         return ret
 
@@ -161,13 +162,9 @@ class Directory(BaseEntry):
             shutil.copytree(work_dir / self._src_path, cache_path)
         self._src_path = cache_path
 
-        # save self instance to cache directory
-        with open(cache_dir / "data", "wb") as f:
-            f.write(pickle.dumps(self))
-
     def copy(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
-        if os.path.exists(dest):
+        if os.path.exists(dest) or os.path.islink(dest):
             if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
@@ -179,12 +176,12 @@ class Directory(BaseEntry):
 
     def link(self, dest: Path | str, overwrite: bool = False):
         os.makedirs(Path(dest).parent, exist_ok=True)
-        if os.path.exists(dest):
+        if os.path.exists(dest) or os.path.islink(dest):
             if not (overwrite or self._allow_overwrite):
                 raise FileExistsError(f"{dest} already exists")
             else:
                 if os.path.islink(dest):
-                    os.remove(dest)
+                    os.unlink(dest)
                 else:
                     shutil.rmtree(dest)
-        os.symlink(self._src_path, dest)
+        os.symlink(self._src_path, dest, target_is_directory=True)

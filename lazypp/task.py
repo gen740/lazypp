@@ -1,23 +1,30 @@
+import ast
 import asyncio
+import base64
 import contextlib
 import copy
 import json
+import multiprocessing
 import os
 import pickle
-import shutil
+import sys
+import threading
 from abc import ABC
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from inspect import getsource
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable, TypeGuard, cast
+from typing import IO, Any, Callable, Literal, TextIO, TypeGuard, cast
 
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group, RenderableType
+from rich.panel import Panel
+from rich.pretty import Pretty
 from xxhash import xxh128
 
 import lazypp.dummy_output
+from lazypp.exceptions import RetryTask
 
 from .file_objects import BaseEntry
 
@@ -56,8 +63,34 @@ def _is_valid_output[OUTPUT](input: OUTPUT | None) -> TypeGuard[OUTPUT]:
     return True
 
 
+class _Tee(TextIO):
+    def __init__(self, file_1: IO[str], file_2: IO[str], disable: tuple[bool, bool]):
+        self.files = (file_1, file_2)
+        self.disable = disable
+
+    def write(self, data):
+        bytes_written = 0
+        for f, d in zip(self.files, self.disable):
+            if not d:
+                f.write(data)
+                bytes_written = len(data)
+        return bytes_written
+
+    def flush(self):
+        for f, d in zip(self.files, self.disable):
+            if not d:
+                f.flush()
+
+
 class BaseTask[INPUT, OUTPUT](ABC):
     _global_locks = defaultdict(asyncio.Lock)
+    _logging_lock: threading.Lock | None = None
+
+    @classmethod
+    def _get_logging_lock(cls):
+        if cls._logging_lock is None:
+            cls._logging_lock = multiprocessing.Manager().Lock()
+        return cls._logging_lock
 
     def __init__(
         self,
@@ -68,6 +101,9 @@ class BaseTask[INPUT, OUTPUT](ABC):
         work_dir: str | Path | None = None,
         show_input: bool = False,
         show_output: bool = False,
+        name: str | None = None,
+        capture: Literal["stdout", "stderr", "both", "none"] = "both",
+        suppress: Literal["stdout", "stderr", "both", "none"] = "none",
     ):
         self._work_dir: Path | TemporaryDirectory | None = (
             Path(work_dir) if work_dir else None
@@ -81,6 +117,43 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._show_output = show_output
         self._hash: str | None = None
         self._upstream_results: list[Any] | None = None
+        self._name = name
+
+        if capture in ["stdout", "stderr", "both", "none"]:
+            if capture == "stdout":
+                self._capture_stdout = True
+                self._capture_stderr = False
+            elif capture == "stderr":
+                self._capture_stdout = False
+                self._capture_stderr = True
+            elif capture == "both":
+                self._capture_stdout = True
+                self._capture_stderr = True
+            else:
+                self._capture_stdout = False
+                self._capture_stderr = False
+        else:
+            raise ValueError(
+                "Invalid value for capture. Should be stdout, stderr, both or none"
+            )
+
+        if suppress in ["stdout", "stderr", "both", "none"]:
+            if suppress == "stdout":
+                self._suppress_stdout = True
+                self._suppress_stderr = False
+            elif suppress == "stderr":
+                self._suppress_stdout = False
+                self._suppress_stderr = True
+            elif suppress == "both":
+                self._suppress_stdout = True
+                self._suppress_stderr = True
+            else:
+                self._suppress_stdout = False
+                self._suppress_stderr = False
+        else:
+            raise ValueError(
+                "Invalid value for suppress. Should be stdout, stderr, both or none"
+            )
 
     def task(self, input: INPUT) -> OUTPUT:
         _ = input
@@ -92,14 +165,14 @@ class BaseTask[INPUT, OUTPUT](ABC):
     def _log_input(self):
         if self._show_input:
             console.log(
-                f"{self.__class__.__name__}: Input",
+                f"{" " * len(self.name)}  Input",
                 self._input,
             )
 
     def _log_output(self):
         if self._show_output:
             console.log(
-                f"{self.__class__.__name__}: Output",
+                f"{" " * len(self.name)}  Output",
                 self._output,
             )
 
@@ -162,27 +235,123 @@ class BaseTask[INPUT, OUTPUT](ABC):
             async with BaseTask._global_locks[await self.get_hash()]:
                 if self._check_cache():
                     self._output = self._load_from_cache()
-                    console.log(
-                        f"{self.__class__.__name__}: Cache found skipping",
-                    )
-                    self._log_input()
-                    self._log_output()
+
+                    component: list[RenderableType] = []
+                    if self._show_input:
+                        component.append(
+                            Panel(
+                                Group(
+                                    Pretty(
+                                        self._input,
+                                        indent_guides=True,
+                                        max_length=50,
+                                    ),
+                                ),
+                                title="Input",
+                                title_align="left",
+                                border_style="bold color(240)",
+                                box=box.SQUARE,
+                            )
+                        )
+                    if self._show_output:
+                        component.append(
+                            Panel(
+                                Group(
+                                    Pretty(
+                                        self._output,
+                                        indent_guides=True,
+                                        max_length=50,
+                                    ),
+                                ),
+                                title="Output",
+                                title_align="left",
+                                border_style="bold color(240)",
+                                box=box.SQUARE,
+                            )
+                        )
+                    with BaseTask._get_logging_lock():
+                        console.log(
+                            Panel(
+                                Group(
+                                    *component,
+                                ),
+                                title=f"{self.name}: Cache found",
+                                title_align="left",
+                                border_style="bold color(240)",
+                                box=box.HEAVY,
+                            )
+                        )
+
                     return self._output
-                if self._worker is None:
-                    await self._setup_workdir()
-                    self._output = self._run_task_in_workdir(self.work_dir)
+                retry_count = 0
+                while retry_count < 3:
+                    try:
+                        if self._worker is None:
+                            await self._setup_workdir()
+                            self._output = self._run_task_in_workdir(self.work_dir)
+                        else:
+                            await self._setup_workdir()
+                            loop = asyncio.get_event_loop()
+                            self._output = await loop.run_in_executor(
+                                self._worker,
+                                self._run_task_in_workdir,
+                                self.work_dir,
+                            )
+                        break
+                    except RetryTask as _:
+                        retry_count += 1
+                        with BaseTask._get_logging_lock():
+                            console.log(
+                                Panel(
+                                    f"[bold red]Retry Count: {retry_count}[/bold red]",
+                                    title=f"{self.name}: Retring...",
+                                    title_align="left",
+                                    border_style="bold red",
+                                    box=box.HEAVY,
+                                )
+                            )
+                        if isinstance(self._work_dir, TemporaryDirectory):
+                            self._work_dir.cleanup()
+                            self._work_dir = None
+                        continue
                 else:
-                    await self._setup_workdir()
-                    loop = asyncio.get_event_loop()
-                    self._output = await loop.run_in_executor(
-                        self._worker, self._run_task_in_workdir, self.work_dir
-                    )
+                    raise RuntimeError("Task failed after 3 retries")
+
             self._cache_output()
             if not _is_valid_output(self._output):
                 raise ValueError(
                     "Output should be a dictionary with string keys and have pickleable values"
                 )
-            self._log_output()
+
+            component: list[RenderableType] = []
+            if self._show_output:
+                component.append(
+                    Panel(
+                        Group(
+                            Pretty(
+                                self._output,
+                                indent_guides=True,
+                                max_length=50,
+                            ),
+                        ),
+                        title="Output",
+                        title_align="left",
+                        border_style="bold blue",
+                        box=box.SQUARE,
+                    )
+                )
+            with BaseTask._get_logging_lock():
+                console.log(
+                    Panel(
+                        Group(
+                            *component,
+                        ),
+                        title=f"{self.name}: Done!",
+                        title_align="left",
+                        border_style="bold green",
+                        box=box.HEAVY,
+                    )
+                )
             return self._output
 
     async def get_hash(self) -> str:
@@ -198,10 +367,67 @@ class BaseTask[INPUT, OUTPUT](ABC):
         return self._hash
 
     def _run_task_in_workdir(self, work_dir: Path) -> OUTPUT:
+        os.makedirs(self._cache_dir / self.hash, exist_ok=True)
+
         with contextlib.chdir(work_dir):
-            console.log(f"{self.__class__.__name__}: Running in {os.getcwd()}")
-            self._log_input()
-            return self.task(copy.deepcopy(self._input))
+            component: list[RenderableType] = []
+            component.append("  cwd   : " + str(work_dir))
+            if self._capture_stdout:
+                component.append(
+                    f"  stdout: {self._cache_dir / self.hash / 'stdout.log'}"
+                )
+            if self._capture_stderr:
+                component.append(
+                    f"  stderr: {self._cache_dir / self.hash / 'stderr.log'}"
+                )
+            if self._show_input:
+                component.append(
+                    Panel(
+                        Group(
+                            Pretty(
+                                self._input,
+                                indent_guides=True,
+                                max_length=50,
+                            ),
+                        ),
+                        title="Input",
+                        title_align="left",
+                        border_style="bold blue",
+                        box=box.SQUARE,
+                    )
+                )
+            with BaseTask._get_logging_lock():
+                console.log(
+                    Panel(
+                        Group(
+                            *component,
+                        ),
+                        title=f"{self.name}: Running...",
+                        title_align="left",
+                        border_style="bold blue",
+                        box=box.HEAVY,
+                    )
+                )
+
+            with (
+                open(self._cache_dir / self.hash / "stdout.log", "w") as stdout_log,
+                open(self._cache_dir / self.hash / "stderr.log", "w") as stderr_log,
+                contextlib.redirect_stdout(
+                    _Tee(
+                        sys.stdout,
+                        stdout_log,
+                        (self._suppress_stdout, not self._capture_stdout),
+                    )
+                ),
+                contextlib.redirect_stderr(
+                    _Tee(
+                        sys.stderr,
+                        stderr_log,
+                        (self._suppress_stderr, not self._capture_stderr),
+                    )
+                ),
+            ):
+                return self.task(copy.deepcopy(self._input))
 
     @property
     def output(self) -> OUTPUT:
@@ -217,7 +443,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         Check if cache exists
         If corresponding hash directory or output files are not found return False
         """
-        if os.path.exists(self._cache_dir / self.hash / "data"):
+        if os.path.exists(self._cache_dir / self.hash / "output.pkl"):
             return True
         return False
 
@@ -229,7 +455,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         if not os.path.exists(self._cache_dir / self.hash):
             raise FileNotFoundError(f"Cache for {self.hash} not found")
         return cast(
-            OUTPUT, pickle.load(open(self._cache_dir / self.hash / "data", "rb"))
+            OUTPUT, pickle.load(open(self._cache_dir / self.hash / "output.pkl", "rb"))
         )
 
     def _cache_output(self):
@@ -237,10 +463,10 @@ class BaseTask[INPUT, OUTPUT](ABC):
             raise ValueError("Output should be a dictionary with string keys")
 
         # remove if exists
-        if os.path.exists(self._cache_dir / self.hash):
-            shutil.rmtree(self._cache_dir / self.hash)
+        if os.path.exists(self._cache_dir / self.hash / "output.pkl"):
+            os.remove(self._cache_dir / self.hash / "output.pkl")
 
-        os.makedirs(self._cache_dir / self.hash)
+        os.makedirs(self._cache_dir / self.hash, exist_ok=True)
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Caching output")
 
@@ -250,11 +476,22 @@ class BaseTask[INPUT, OUTPUT](ABC):
             BaseEntry,
         )
 
-        with open(self._cache_dir / self.hash / "data", "wb") as f:
+        # dump inputs as json
+        with open(self._cache_dir / self.hash / "input.json", "w") as f:
+            f.write(self._dump_input(indent=4))
+
+        # dump output
+        with open(self._cache_dir / self.hash / "output.pkl", "wb") as f:
             f.write(pickle.dumps(self._output))
 
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Caching output done")
+
+    @property
+    def name(self) -> str:
+        if self._name is None:
+            self._name = self.__class__.__name__
+        return self._name
 
     def _calculate_hash(self):
         """
@@ -263,7 +500,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         """
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Calculating hash")
-        res = xxh128(self._dump_input().encode()).hexdigest()
+        res = f"{xxh128(self._dump_input().encode()).hexdigest()}_{self.name}"
         if _DEBUG:
             console.log(f"{self.__class__.__name__}: Calculating hash done")
         return res
@@ -283,13 +520,13 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 "Input should be a dictionary with string keys and have pickleable values"
             )
 
-        source_hash = xxh128(getsource(self.task.__code__).encode()).hexdigest()
+        source_code = base64.b64encode(self.task.__code__.co_code).decode()
         if self._input is None:
-            return json.dumps({"__lazypp_task_source__": source_hash})
+            return json.dumps({"__lazypp_task_source__": source_code})
 
         ret = copy.deepcopy(self._input)
 
-        ret["__lazypp_task_source__"] = source_hash
+        ret["__lazypp_task_source__"] = source_code
         _call_func_on_specific_class(
             ret,
             lambda entry: entry._xxh128_hash().hexdigest(),
@@ -323,6 +560,9 @@ class BaseTask[INPUT, OUTPUT](ABC):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._output_lock = asyncio.Lock()
+
+    def __repr__(self):
+        return f"<{self.name}: {self.hash}>"
 
 
 def _call_func_on_specific_class[T](
