@@ -1,4 +1,3 @@
-import ast
 import asyncio
 import base64
 import contextlib
@@ -520,7 +519,13 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 "Input should be a dictionary with string keys and have pickleable values"
             )
 
-        source_code = base64.b64encode(self.task.__code__.co_code).decode()
+        source_code = {
+            "co_code": base64.b64encode(self.task.__code__.co_code).decode(),
+            "co_consts": self.task.__code__.co_consts,
+            "co_varnames": self.task.__code__.co_varnames,
+            "co_names": self.task.__code__.co_names,
+        }
+
         if self._input is None:
             return json.dumps({"__lazypp_task_source__": source_code})
 
