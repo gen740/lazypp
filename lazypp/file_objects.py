@@ -3,7 +3,7 @@ import shutil
 from abc import ABC
 from pathlib import Path
 
-from xxhash import xxh128, xxh32, xxh64
+from xxhash import xxh128
 
 
 def _is_outside_base(relative_path: Path) -> bool:

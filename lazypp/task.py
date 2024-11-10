@@ -183,17 +183,21 @@ class BaseTask[INPUT, OUTPUT](ABC):
             return
 
         dependent_tasks = []
+
         _call_func_on_specific_class(
             self._input,
             lambda task: dependent_tasks.append(asyncio.create_task(task())),
             BaseTask,
         )
+
         _call_func_on_specific_class(
             self._input,
             lambda output: dependent_tasks.append(asyncio.create_task(output.task())),
             lazypp.dummy_output.DummyOutput,
         )
+
         self._upstream_results = await asyncio.gather(*dependent_tasks)
+
         _call_func_on_specific_class(
             self._input,
             lambda output: output.restore_output(),
@@ -217,12 +221,6 @@ class BaseTask[INPUT, OUTPUT](ABC):
             lambda entry: entry._copy_to_dest(self.work_dir),
             BaseEntry,
         )
-        for output in self._upstream_results:
-            _call_func_on_specific_class(
-                output,
-                lambda entry: entry._copy_to_dest(self.work_dir),
-                BaseEntry,
-            )
 
     async def __call__(self) -> OUTPUT:
         async with self._output_lock:
@@ -568,6 +566,11 @@ class BaseTask[INPUT, OUTPUT](ABC):
 
     def __repr__(self):
         return f"<{self.name}: {self.hash}>"
+
+    def __eq__(self, other):
+        if not isinstance(other, BaseTask):
+            return False
+        return self.hash == other.hash
 
 
 def _call_func_on_specific_class[T](
