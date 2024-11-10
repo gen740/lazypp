@@ -24,6 +24,7 @@ from xxhash import xxh128
 
 import lazypp.dummy_output
 from lazypp.exceptions import RetryTask
+from lazypp.reusable_file_objects import ReusableFile
 
 from .file_objects import BaseEntry
 
@@ -84,6 +85,10 @@ class _Tee(TextIO):
 class BaseTask[INPUT, OUTPUT](ABC):
     _global_locks = defaultdict(asyncio.Lock)
     _logging_lock: threading.Lock | None = None
+
+    @property
+    def cache_dir(self) -> Path:
+        return self._cache_dir
 
     @classmethod
     def _get_logging_lock(cls):
@@ -539,6 +544,11 @@ class BaseTask[INPUT, OUTPUT](ABC):
             ret,
             lambda task: task.hash,
             BaseTask,
+        )
+        _call_func_on_specific_class(
+            ret,
+            lambda reusable_file: reusable_file.hash,
+            ReusableFile,
         )
         return json.dumps(ret, indent=indent)
 

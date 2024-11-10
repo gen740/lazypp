@@ -1,11 +1,6 @@
 import tempfile
-import time
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TypedDict
-
-import numpy as np
-import pytest
 
 from lazypp import BaseTask, File
 
@@ -54,6 +49,7 @@ class TestTask2(BaseTask[TestTask2Input, TestTask2Output]):
         with open(input["in2"].path, "r") as f:
             b = int(f.read())
         return {"res": a + b}
+
 
 def test_deps():
     task = TestTask1(

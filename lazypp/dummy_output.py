@@ -15,6 +15,3 @@ class DummyOutput:
         for key in self._keys:
             ret = ret[key]
         return ret
-
-    def __getattr__(self, _):
-        raise RuntimeError("You should run task first")
