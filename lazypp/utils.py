@@ -29,7 +29,7 @@ def run_sh(
                     output.flush()
 
 
-def gather(output: Any):
+def gather[T](output: T) -> T:
     tasks = []
     visited = set()
 
@@ -69,4 +69,8 @@ def gather(output: Any):
             ret_obj = output.restore_output()
         return ret_obj
 
-    return _restore_dummy_output(ret, output)
+    ret = _restore_dummy_output(ret, output)
+    if ret is None:
+        raise ValueError("output is None")
+
+    return ret

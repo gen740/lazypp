@@ -121,6 +121,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._show_output = show_output
         self._hash: str | None = None
         self._upstream_results: list[Any] | None = None
+        self._upstream_raw_output_mask: list[bool] = []
         self._name = name
 
         if capture in ["stdout", "stderr", "both", "none"]:
@@ -187,17 +188,27 @@ class BaseTask[INPUT, OUTPUT](ABC):
             self._upstream_results = []
             return
 
+        self._upstream_raw_output_mask = []
+
         dependent_tasks = []
+
+        def _add_to_dependent_tasks(task):
+            dependent_tasks.append(asyncio.create_task(task()))
+            self._upstream_raw_output_mask.append(True)
 
         _call_func_on_specific_class(
             self._input,
-            lambda task: dependent_tasks.append(asyncio.create_task(task())),
+            _add_to_dependent_tasks,
             BaseTask,
         )
 
+        def _add_dummyoutput_to_dependent_tasks(output):
+            dependent_tasks.append(asyncio.create_task(output.task()))
+            self._upstream_raw_output_mask.append(False)
+
         _call_func_on_specific_class(
             self._input,
-            lambda output: dependent_tasks.append(asyncio.create_task(output.task())),
+            _add_dummyoutput_to_dependent_tasks,
             lazypp.dummy_output.DummyOutput,
         )
 
@@ -226,6 +237,16 @@ class BaseTask[INPUT, OUTPUT](ABC):
             lambda entry: entry._copy_to_dest(self.work_dir),
             BaseEntry,
         )
+
+        for output, is_raw in zip(
+            self._upstream_results, self._upstream_raw_output_mask
+        ):
+            if is_raw:
+                _call_func_on_specific_class(
+                    output,
+                    lambda entry: entry._copy_to_dest(self.work_dir),
+                    BaseEntry,
+                )
 
     async def __call__(self) -> OUTPUT:
         async with self._output_lock:

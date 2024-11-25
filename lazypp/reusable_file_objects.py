@@ -46,7 +46,7 @@ class ReusableFile:
             if self._copy:
                 shutil.copy(self._cache_dir / self.hash, self.hash)
             else:
-                os.link(self._cache_dir / self.hash, self.hash)
+                os.symlink(self._cache_dir / self.hash, self.hash)
             return Path(self.hash)
         else:
             self._file_lock = FileLock(self._cache_dir / (self.hash + ".lock"))
@@ -56,7 +56,7 @@ class ReusableFile:
                     if self._copy:
                         shutil.copy(self._cache_dir / self.hash, self.hash)
                     else:
-                        os.link(self._cache_dir / self.hash, self.hash)
+                        os.symlink(self._cache_dir / self.hash, self.hash)
                 finally:
                     self._file_lock.release()
                     self._file_lock = None
