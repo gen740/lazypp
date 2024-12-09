@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from lazypp.dummy_output import DummyOutput
-from lazypp.task import BaseTask
+from lazypp.task import BaseTask, _call_func_on_specific_class
 
 
 def run_sh(
@@ -36,6 +36,8 @@ def gather[T](output: T) -> T:
     def _gather_task(output: Any):
         if id(output) in visited:
             return
+        else:
+            visited.add(id(output))
         if isinstance(output, Sequence):
             for item in output:
                 _gather_task(item)
@@ -55,21 +57,11 @@ def gather[T](output: T) -> T:
     visited.clear()
 
     ret = copy.deepcopy(output)
-
-    def _restore_dummy_output(ret_obj: Any, output: Any):
-        if id(output) in visited:
-            return
-        if isinstance(output, Sequence):
-            for i, item in enumerate(output):
-                ret_obj[i] = _restore_dummy_output(ret_obj[i], item)
-        elif isinstance(output, Mapping):
-            for key, item in output.items():
-                ret_obj[key] = _restore_dummy_output(ret_obj[key], item)
-        elif isinstance(output, DummyOutput):
-            ret_obj = output.restore_output()
-        return ret_obj
-
-    ret = _restore_dummy_output(ret, output)
+    ret = _call_func_on_specific_class(
+        ret,
+        lambda obj: obj.restore_output(),
+        DummyOutput,
+    )
     if ret is None:
         raise ValueError("output is None")
 
