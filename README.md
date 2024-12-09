@@ -18,14 +18,14 @@ pip install lazypp
 Here's an example:
 
 ```python
-import asyncio
 from pathlib import Path
 from typing import TypedDict
+import time
 
 from lazypp import BaseTask
 
 # Define a base class for your tasks
-class TestBaseTask(BaseTask[INPUT, OUTPUT]):
+class TestBaseTask[INPUT, OUTPUT](BaseTask[INPUT, OUTPUT]):
     def __init__(self, input: INPUT):
         super().__init__(
             cache_dir=Path("cache").resolve(),
@@ -41,8 +41,8 @@ class Fout(TypedDict):
 
 # Define a specific task that says hello
 class Hello(TestBaseTask[Fin, Fout]):
-    async def task(self, input: Fin) -> Fout:
-        await asyncio.sleep(3)  # Simulating a long-running task
+    def task(self, input: Fin) -> Fout:
+        time.sleep(3)  # Simulating a long-running task
         return {"output": f"Hello, {input['your_name']}"}
 
 # Create and execute the task
