@@ -10,3 +10,5 @@ venv/
 *.egg-info/
 build/
 dist/
+
+.direnv

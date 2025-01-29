@@ -13,6 +13,7 @@
             pyright
             ruff
             ruff-lsp
+            graphviz
           ];
           venvDir = "venv";
         };

@@ -1,12 +1,14 @@
+import ast
 import asyncio
-import base64
 import contextlib
 import copy
+import inspect
 import json
 import multiprocessing
 import os
 import pickle
 import sys
+import textwrap
 import threading
 from abc import ABC
 from collections import defaultdict
@@ -84,7 +86,7 @@ class _Tee(TextIO):
 
 class BaseTask[INPUT, OUTPUT](ABC):
     _global_locks = defaultdict(asyncio.Lock)
-    _logging_lock: threading.Lock | None = None
+    _logging_lock: "threading.Lock | None" = None
 
     @property
     def cache_dir(self) -> Path:
@@ -108,6 +110,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         name: str | None = None,
         capture: Literal["stdout", "stderr", "both", "none"] = "both",
         suppress: Literal["stdout", "stderr", "both", "none"] = "none",
+        verbose_style: box.Box = box.SQUARE,
     ):
         self._work_dir: Path | TemporaryDirectory | None = (
             Path(work_dir) if work_dir else None
@@ -123,6 +126,24 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._upstream_results: list[Any] | None = None
         self._upstream_raw_output_mask: list[bool] = []
         self._name = name
+        self._max_retry = 3
+        self._verbose_style = verbose_style
+        self._status: Literal[
+            "RUNNING", "COMPLETE", "FAILED", "WAITING", "SKIPPED", "CACHED"
+        ] = "WAITING"
+        self._dependent_tasks: list[BaseTask] = []
+
+        _call_func_on_specific_class(
+            self._input,
+            lambda task: self._dependent_tasks.append(task),
+            BaseTask,
+        )
+
+        _call_func_on_specific_class(
+            self._input,
+            lambda task: self._dependent_tasks.append(task.task),
+            lazypp.dummy_output.DummyOutput,
+        )
 
         if capture in ["stdout", "stderr", "both", "none"]:
             if capture == "stdout":
@@ -164,20 +185,20 @@ class BaseTask[INPUT, OUTPUT](ABC):
         _ = input
         raise NotImplementedError
 
-    def result(self) -> OUTPUT:
+    def result(self) -> OUTPUT | None:
         return asyncio.run(self())
 
     def _log_input(self):
         if self._show_input:
             console.log(
-                f"{" " * len(self.name)}  Input",
+                f"{' ' * len(self.name)}  Input",
                 self._input,
             )
 
     def _log_output(self):
         if self._show_output:
             console.log(
-                f"{" " * len(self.name)}  Output",
+                f"{' ' * len(self.name)}  Output",
                 self._output,
             )
 
@@ -202,7 +223,9 @@ class BaseTask[INPUT, OUTPUT](ABC):
             BaseTask,
         )
 
-        def _add_dummyoutput_to_dependent_tasks(output):
+        def _add_dummyoutput_to_dependent_tasks(
+            output: lazypp.dummy_output.DummyOutput,
+        ):
             dependent_tasks.append(asyncio.create_task(output.task()))
             self._upstream_raw_output_mask.append(False)
 
@@ -248,15 +271,23 @@ class BaseTask[INPUT, OUTPUT](ABC):
                     BaseEntry,
                 )
 
-    async def __call__(self) -> OUTPUT:
+    async def __call__(self) -> OUTPUT | None:
         async with self._output_lock:
             if self._output is not None:
                 return self._output
 
             await self._collect_upstream_results()
 
+            for dep in self._dependent_tasks:
+                if dep.status == "FAILED" or dep.status == "SKIPPED":
+                    self._status = "SKIPPED"
+                    return
+
             async with BaseTask._global_locks[await self.get_hash()]:
+                if self.status == "FAILED":
+                    return None
                 if self._check_cache():
+                    self._status = "CACHED"
                     self._output = self._load_from_cache()
 
                     component: list[RenderableType] = []
@@ -273,7 +304,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                                 title="Input",
                                 title_align="left",
                                 border_style="bold color(240)",
-                                box=box.SQUARE,
+                                box=self._verbose_style,
                             )
                         )
                     if self._show_output:
@@ -289,7 +320,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                                 title="Output",
                                 title_align="left",
                                 border_style="bold color(240)",
-                                box=box.SQUARE,
+                                box=self._verbose_style,
                             )
                         )
                     with BaseTask._get_logging_lock():
@@ -301,13 +332,13 @@ class BaseTask[INPUT, OUTPUT](ABC):
                                 title=f"{self.name}: Cache found",
                                 title_align="left",
                                 border_style="bold color(240)",
-                                box=box.HEAVY,
+                                box=self._verbose_style,
                             )
                         )
-
                     return self._output
                 retry_count = 0
-                while retry_count < 3:
+                self._status = "RUNNING"
+                while retry_count < self._max_retry:
                     try:
                         if self._worker is None:
                             await self._setup_workdir()
@@ -330,15 +361,22 @@ class BaseTask[INPUT, OUTPUT](ABC):
                                     title=f"{self.name}: Retring...",
                                     title_align="left",
                                     border_style="bold red",
-                                    box=box.HEAVY,
+                                    box=self._verbose_style,
                                 )
                             )
                         if isinstance(self._work_dir, TemporaryDirectory):
                             self._work_dir.cleanup()
                             self._work_dir = None
                         continue
+                    except Exception as e:
+                        self._status = "FAILED"
+                        self._failed_reason = str(e)
+                        return None
                 else:
-                    raise RuntimeError("Task failed after 3 retries")
+                    self._status = "FAILED"
+                    self._failed_reason = "Max retry count reached"
+                    return None
+                self._status = "COMPLETE"
 
             self._cache_output()
             if not _is_valid_output(self._output):
@@ -360,7 +398,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                         title="Output",
                         title_align="left",
                         border_style="bold blue",
-                        box=box.SQUARE,
+                        box=self._verbose_style,
                     )
                 )
             with BaseTask._get_logging_lock():
@@ -372,7 +410,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                         title=f"{self.name}: Done!",
                         title_align="left",
                         border_style="bold green",
-                        box=box.HEAVY,
+                        box=self._verbose_style,
                     )
                 )
             return self._output
@@ -416,7 +454,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                         title="Input",
                         title_align="left",
                         border_style="bold blue",
-                        box=box.SQUARE,
+                        box=self._verbose_style,
                     )
                 )
             with BaseTask._get_logging_lock():
@@ -428,7 +466,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
                         title=f"{self.name}: Running...",
                         title_align="left",
                         border_style="bold blue",
-                        box=box.HEAVY,
+                        box=self._verbose_style,
                     )
                 )
 
@@ -451,6 +489,12 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 ),
             ):
                 return self.task(copy.deepcopy(self._input))
+
+    @property
+    def status(
+        self,
+    ) -> Literal["RUNNING", "COMPLETE", "FAILED", "WAITING", "SKIPPED", "CACHED"]:
+        return self._status
 
     @property
     def output(self) -> OUTPUT:
@@ -513,7 +557,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
     @property
     def name(self) -> str:
         if self._name is None:
-            self._name = self.__class__.__name__
+            self._name = f"{self.__class__.__name__}_unnamed_{id(self)}"
         return self._name
 
     def _calculate_hash(self):
@@ -544,10 +588,16 @@ class BaseTask[INPUT, OUTPUT](ABC):
             )
 
         source_code = {
-            "co_code": base64.b64encode(self.task.__code__.co_code).decode(),
-            "co_consts": self.task.__code__.co_consts,
-            "co_varnames": self.task.__code__.co_varnames,
-            "co_names": self.task.__code__.co_names,
+            "co_code": xxh128(
+                ast.dump(
+                    ast.parse(
+                        textwrap.dedent(inspect.getsource(self.task)),
+                        type_comments=False,
+                    ),
+                    annotate_fields=False,
+                    include_attributes=False,
+                )
+            ).hexdigest(),
         }
 
         if self._input is None:
@@ -589,6 +639,7 @@ class BaseTask[INPUT, OUTPUT](ABC):
         state = self.__dict__.copy()
         state["_worker"] = None  # worker is not picklable
         state["_output_lock"] = None  # lock is not picklable
+        state["_dependent_tasks"] = []  # dependent tasks are not picklable
         return state
 
     def __setstate__(self, state):
@@ -596,6 +647,8 @@ class BaseTask[INPUT, OUTPUT](ABC):
         self._output_lock = asyncio.Lock()
 
     def __repr__(self):
+        if self._hash is None:
+            return f"<{self.name}: Not run yet>"
         return f"<{self.name}: {self.hash}>"
 
     def __eq__(self, other):
