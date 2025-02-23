@@ -4,6 +4,7 @@ import os
 import select
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -17,6 +18,7 @@ def run_sh(
     command: list[str],
     env: dict[str, str] | None = None,
     input_data: str | None = None,  # stdin に送るデータを引数として受け取る
+    input_delay: float | None = None,
 ):
     # Popen を使って sys.stdout に出力する例
     with subprocess.Popen(
@@ -30,6 +32,8 @@ def run_sh(
         if input_data:
             # stdin にデータを書き込む
             assert process.stdin is not None
+            if input_delay is not None:
+                time.sleep(input_delay)
             process.stdin.write(input_data)
             process.stdin.close()  # 書き込みが終わったら閉じる
 
@@ -57,7 +61,7 @@ def source(script_path: str):
             os.environ[key] = value
 
 
-def gather[T](output: T) -> T:
+def _gather_tasks(inputs) -> list[BaseTask]:
     tasks = []
     visited = set()
 
@@ -73,16 +77,19 @@ def gather[T](output: T) -> T:
             for item in output.values():
                 _gather_task(item)
         elif isinstance(output, DummyOutput):
-            tasks.append(output.task())
+            tasks.append(output.task)
         elif isinstance(output, BaseTask):
-            tasks.append(output())
+            tasks.append(output)
 
-    _gather_task(output)
+    _gather_task(inputs)
+    return tasks
+
+
+def gather[T](output: T) -> T:
+    tasks = [t() for t in _gather_tasks(output)]
 
     loop = asyncio.get_event_loop()
     loop.run_until_complete(asyncio.gather(*tasks))
-
-    visited.clear()
 
     ret: T = copy.deepcopy(output)
     ret: T = _call_func_on_specific_class(
@@ -96,8 +103,10 @@ def gather[T](output: T) -> T:
     return ret
 
 
-def visualize(task: BaseTask, filename: str):
+def visualize(input: Any) -> graphviz.Digraph:
     dot = graphviz.Digraph()
+
+    tasks = _gather_tasks(input)
 
     def _visualize(task: BaseTask, dot: graphviz.Digraph):
         if task in dot.body:
@@ -105,10 +114,10 @@ def visualize(task: BaseTask, filename: str):
 
         if task.status in ["FAILED", "SKIPPED"]:
             dot.node(
-                task.name,
+                task._visualization_node_name,
                 f"{task.name}\nstatus: {task.status}",
                 color="red",
-                bgcolor = "black",
+                bgcolor="black",
                 fillcolor="red",
                 style="filled",
                 fontcolor="white",
@@ -116,7 +125,7 @@ def visualize(task: BaseTask, filename: str):
             )
         elif task.status == "RUNNING":
             dot.node(
-                task.name,
+                task._visualization_node_name,
                 f"{task.name}\nstatus: {task.status}",
                 color="green",
                 fillcolor="green",
@@ -126,7 +135,7 @@ def visualize(task: BaseTask, filename: str):
             )
         elif task.status == "COMPLETE":
             dot.node(
-                task.name,
+                task._visualization_node_name,
                 f"{task.name}\nstatus: {task.status}",
                 color="blue",
                 fillcolor="blue",
@@ -136,7 +145,7 @@ def visualize(task: BaseTask, filename: str):
             )
         elif task.status == "CACHED":
             dot.node(
-                task.name,
+                task._visualization_node_name,
                 f"{task.name}\nstatus: {task.status}",
                 color="black",
                 fillcolor="gray",
@@ -145,7 +154,9 @@ def visualize(task: BaseTask, filename: str):
                 shape="box",
             )
         else:
-            dot.node(task.name, f"{task.name}\nstatus: {task.status}")
+            dot.node(
+                task._visualization_node_name, f"{task.name}\nstatus: {task.status}"
+            )
 
         # create unique
         unique_dependencies = []
@@ -155,8 +166,10 @@ def visualize(task: BaseTask, filename: str):
                 unique_dependencies.append(dep)
 
         for dep in unique_dependencies:
-            dot.edge(dep.name, task.name)
+            dot.edge(dep._visualization_node_name, task._visualization_node_name)
             _visualize(dep, dot)
 
-    _visualize(task, dot)
+    for task in tasks:
+        _visualize(task, dot)
+
     return dot

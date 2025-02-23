@@ -557,8 +557,18 @@ class BaseTask[INPUT, OUTPUT](ABC):
     @property
     def name(self) -> str:
         if self._name is None:
-            self._name = f"{self.__class__.__name__}_unnamed_{id(self)}"
+            return f"{self.__class__.__name__}"
         return self._name
+
+    @property
+    def _visualization_node_name(self) -> str:
+        if self._name is not None:
+            return self._name
+        if self.status in ["COMPLETE", "CACHED", "FAILED", "RUNNING"]:
+            return self.hash
+        elif self.status in ["WAITING", "SKIPPED"]:
+            return f"{self.__class__.__name__}_unnamed_{id(self)}"
+        raise RuntimeError("Invalid status")
 
     def _calculate_hash(self):
         """
@@ -587,18 +597,14 @@ class BaseTask[INPUT, OUTPUT](ABC):
                 "Input should be a dictionary with string keys and have pickleable values"
             )
 
-        source_code = {
-            "co_code": xxh128(
-                ast.dump(
-                    ast.parse(
-                        textwrap.dedent(inspect.getsource(self.task)),
-                        type_comments=False,
-                    ),
-                    annotate_fields=False,
-                    include_attributes=False,
-                )
-            ).hexdigest(),
-        }
+        source_code = ast.dump(
+            ast.parse(
+                textwrap.dedent(inspect.getsource(self.task)),
+                type_comments=False,
+            ),
+            annotate_fields=False,
+            include_attributes=False,
+        )
 
         if self._input is None:
             return json.dumps({"__lazypp_task_source__": source_code})

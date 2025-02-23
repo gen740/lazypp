@@ -276,7 +276,7 @@ def main():
 
     sum_all_task.result()
 
-    visualize(sum_all_task, "").view()
+    visualize((sum_all_task, None, 4, 3.21)).view()
 
 
 if __name__ == "__main__":
